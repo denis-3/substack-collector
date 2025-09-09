@@ -1,0 +1,103 @@
+import java.time.Duration
+import java.net.CookieHandler
+import java.net.CookieManager
+import java.net.CookiePolicy
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse.BodyHandlers
+import java.net.URI
+import java.util.zip.GZIPInputStream
+import kotlin.jvm.optionals.getOrNull
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+
+data class HttpRequestSummary(val statusCode: Short, val headers: Map<String, List<String>>, val text: String) {}
+
+val HTTP_HEADERS = mapOf(
+	"User-Agent" to "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+	"Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+	"Accept-Language" to "en-US,en;q=0.5",
+	"Accept-Encoding" to "gzip",
+	"Sec-GPC" to "1",
+	"Upgrade-Insecure-Requests" to "1",
+	"Sec-Fetch-Dest" to "document",
+	"Sec-Fetch-Mode" to "navigate",
+	"Sec-Fetch-Site" to "none",
+	"Sec-Fetch-User" to "?1",
+	"Priority" to "u=0, i",
+	"TE" to "trailers"
+)
+
+suspend fun http2Request(url: String): HttpRequestSummary {
+	val cookieManager = CookieHandler.getDefault()
+	if (cookieManager == null) {
+		val newCookieManager = CookieManager()
+		CookieHandler.setDefault(newCookieManager)
+		newCookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ALL)
+	}
+	val client = HttpClient.newBuilder()
+		.version(HttpClient.Version.HTTP_1_1)
+		.followRedirects(HttpClient.Redirect.NORMAL)
+		.connectTimeout(Duration.ofSeconds(60))
+		.cookieHandler(CookieHandler.getDefault())
+		.build()
+	val request = HttpRequest.newBuilder()
+		.uri(URI.create(url))
+
+	HTTP_HEADERS.forEach { (headerName, value) ->
+		request.header(headerName, value)
+	}
+
+	val resp = client.send(request.build(), BodyHandlers.ofInputStream())
+	val respHeaders = resp.headers()
+	val compression = respHeaders.firstValue("Content-Encoding").getOrNull()
+
+	if (compression == "gzip") {
+		val gUnzipInput = GZIPInputStream(resp.body())
+		return HttpRequestSummary(
+			resp.statusCode().toShort(),
+			respHeaders.map(),
+			gUnzipInput.bufferedReader().use { it.readText() }
+		)
+	} else if (compression != null) {
+		throw Exception("Unrecognized compression: $compression")
+	}
+
+	return HttpRequestSummary(
+		resp.statusCode().toShort(),
+		respHeaders.map(),
+		resp.body().bufferedReader().use { it.readText() }
+	)
+}
+
+// Custom HTTP2 request with cookies and re-try support
+suspend fun customHttp2Request(url: String, retry: Boolean = true): HttpRequestSummary {
+	// New cookies
+	val cookieManager = CookieManager()
+	CookieHandler.setDefault(cookieManager)
+	cookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ALL)
+
+	val httpResp = coroutineScope { async { http2Request(url) }.await() }
+	if (httpResp.statusCode == 429.toShort() && retry) {
+		println("Got a 429 status code! Retrying in 10s with new cookies...")
+		delay(10000)
+		return customHttp2Request(url, false)
+	} else if (httpResp.statusCode != 200.toShort() && httpResp.statusCode != 403.toShort()) { // Some private substacks return 403
+		println("Start HTTP response from failing request")
+		println(httpResp.text)
+		throw Exception("Unrecognized status code [$url]: ${httpResp.statusCode}")
+	}
+	val httpHeadersWithLists: Map<String, List<String>> = HTTP_HEADERS.mapValues { listOf(it.value) }
+	val afterCookies = cookieManager.get(URI.create(url), httpHeadersWithLists)
+	println("Cookies after the request: $afterCookies")
+	return httpResp
+}
+
+suspend fun main() {
+	println("Starting customHttp2Request()...")
+	val url = "https://www.java.com"
+	val result = coroutineScope { async { customHttp2Request(url) }.await() }
+	println("HTTP2 fetch status code for $url: ${result.statusCode}")
+}
