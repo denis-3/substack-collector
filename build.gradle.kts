@@ -24,6 +24,7 @@ repositories {
 
 dependencies {
 	implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+	implementation("org.jsoup:jsoup:1.21.2")
 }
 
 sourceSets.main {
@@ -31,6 +32,6 @@ sourceSets.main {
 }
 
 application {
-	mainClass = "K_stackKt"
+	mainClass = "SubstackLogicKt"
 	applicationDefaultJvmArgs = listOf("-Dkotlinx.coroutines.debug")
 }

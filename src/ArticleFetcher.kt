@@ -1,3 +1,5 @@
+package articlefetcher
+
 import java.time.Duration
 import java.net.CookieHandler
 import java.net.CookieManager
@@ -30,7 +32,8 @@ val HTTP_HEADERS = mapOf(
 	"TE" to "trailers"
 )
 
-suspend fun http2Request(url: String): HttpRequestSummary {
+// Basic implementation of an HTTP2 request
+private suspend fun http2Request(url: String): HttpRequestSummary {
 	val cookieManager = CookieHandler.getDefault()
 	if (cookieManager == null) {
 		val newCookieManager = CookieManager()
@@ -89,15 +92,5 @@ suspend fun customHttp2Request(url: String, retry: Boolean = true): HttpRequestS
 		println(httpResp.text)
 		throw Exception("Unrecognized status code [$url]: ${httpResp.statusCode}")
 	}
-	val httpHeadersWithLists: Map<String, List<String>> = HTTP_HEADERS.mapValues { listOf(it.value) }
-	val afterCookies = cookieManager.get(URI.create(url), httpHeadersWithLists)
-	println("Cookies after the request: $afterCookies")
 	return httpResp
-}
-
-suspend fun main() {
-	println("Starting customHttp2Request()...")
-	val url = "https://www.java.com"
-	val result = coroutineScope { async { customHttp2Request(url) }.await() }
-	println("HTTP2 fetch status code for $url: ${result.statusCode}")
 }
