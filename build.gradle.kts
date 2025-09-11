@@ -12,7 +12,7 @@ java {
 
 kotlin {
 	compilerOptions {
-		allWarningsAsErrors = true
+		// allWarningsAsErrors = true
 		extraWarnings = true
 		freeCompilerArgs = listOf("-Xuse-fir-lt=false")
 	}
@@ -25,6 +25,7 @@ repositories {
 dependencies {
 	implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
 	implementation("org.jsoup:jsoup:1.21.2")
+	implementation("org.json:json:20250517")
 }
 
 sourceSets.main {

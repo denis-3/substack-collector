@@ -11,7 +11,8 @@ A simple (soon-to-be) app for downloading and storing articles in markdown. This
 ## Dependencies
 
 This project currently depends on
-* `kotlinx-coroutines-core v1.10.2` for coroutines and
-* `jsoup v1.21.2` for parsing HTML.
+* `kotlinx-coroutines-core v1.10.2` for coroutines,
+* `jsoup v1.21.2` for parsing HTML, and
+* `json v20250517` for parsing JSON.
 
 In general, dependencies will be kept to a minimum to reduce code complexity and allow for deploying on resource-constrained systems, like embedded computers.
