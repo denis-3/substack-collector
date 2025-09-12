@@ -19,36 +19,66 @@ private val DATE_RE_3 = Regex("\\\"post_date\\\":\\\"(\\d{4}-\\d{2}-\\d{2}T\\d{2
 
 // Parse the inner HTML of an element to markdown
 fun parseInnerHtmlToMd(elm: Element): String {
-	when (elm.tagName()) {
-		"p" -> {
-			return "\n\n" + elm.text()
-		}
-		"ul" -> {
-			var md = "\n"
-			for (point in elm.children()) {
-				md += "\n* " + point.text()
+	val children = elm.children()
+	if (children.size == 0) return elm.text()
+	var res = ""
+	for (child in children) {
+		when (child.tagName()) {
+			"p" -> {
+				res += parseInnerHtmlToMd(child) + "\n"
 			}
-			return md
-		}
-		"ol" -> {
-			var md = "\n"
-			val points = elm.children()
-			for (i in points.indices) {
-				md += "\n${i+1}. " + points[i].text()
+			"span" -> {
+				res += child.text()
 			}
-			return md
-		}
-		else -> {
-			return "\nUnsupported element tag name: ${elm.tagName()}"
+			"strong", "h1", "h2", "h3", "h4", "h5", "h6" -> {
+				val parsedBoldText = parseInnerHtmlToMd(child)
+				res += if (parsedBoldText.endsWith(" ")) "**${parsedBoldText.slice(0..(parsedBoldText.length-1))}** " else
+					"**$parsedBoldText**"
+			}
+			"em" -> {
+				val parsedItalicText = parseInnerHtmlToMd(child)
+				res += if (parsedItalicText.endsWith(" ")) "*${parsedItalicText.slice(0..(parsedItalicText.length-1))}* " else
+					"*$parsedItalicText*"
+			}
+			"s" -> {
+				val parsedStrikeText = parseInnerHtmlToMd(child)
+				res += if (parsedStrikeText.endsWith(" ")) "*${parsedStrikeText.slice(0..(parsedStrikeText.length-1))}* " else
+					"*$parsedStrikeText*"
+			}
+			"code", "pre" -> {
+				val codeText = child.text()
+				res += if (codeText.endsWith(" ")) "`$codeText` " else "`$codeText`"
+			}
+			"ul" -> {
+				val points = child.children()
+				for (point in points) {
+					res += "  *" + parseInnerHtmlToMd(point).trim() + "\n"
+				}
+				res = res.slice(0..(res.length-1)) // remove trailing \n
+			}
+			"ol" -> {
+				val points = child.children()
+				for (i in points.indices) {
+					res += "  ${i+1}." + parseInnerHtmlToMd(points[i]).trim() + "\n"
+				}
+				res = res.slice(0..(res.length-1)) // remove trailing \n
+			}
+			"blockquote" -> {
+				res += ">" + parseInnerHtmlToMd(child)
+			}
+			else -> {
+				res += "\nUnsupported child element tag name: ${child.tagName()}"
+			}
 		}
 	}
+	return res
 }
 
 suspend fun scrapeArticle(articleLink: String): String {
 	println("Scraping $articleLink...")
 	val webResult = coroutineScope { async { customHttp2Request(articleLink) }.await() }
 
-	// Save article HTML for debugging (is overwritten on subsequent calls of scrapeArticle())
+	// Save article HTML for debugging (it's overwritten on subsequent calls of scrapeArticle())
 	File("tmp/article.html").bufferedWriter().use { out -> out.write(webResult.text) }
 	var articleDoc = Jsoup.parse(webResult.text)
 
@@ -85,11 +115,15 @@ suspend fun scrapeArticle(articleLink: String): String {
 		throw Exception("Article date is null!")
 	}
 
-	// This is the main string
 	val localDateTime = LocalDateTime.now()
 	val zonedDateTime = ZonedDateTime.of(localDateTime, ZoneId.systemDefault())
 	val nowDateString = zonedDateTime.format(DateTimeFormatter.ofPattern("eee, MMM dd, YYYY, HH:mm:ss z"))
-	var parsedArticle = "Original URL: $articleLink\nScrape time: ${nowDateString}"
+	// This is the main string
+	var parsedArticle = "Original URL: $articleLink\nScrape time: ${nowDateString}\n\n# $articleTitle"
+	if (articleSubtitle != null) {
+		parsedArticle += "\n## $articleSubtitle"
+	}
+	parsedArticle += "\n### $articleDate"
 
 	var actualArticleText: String = ""
 	// Get the real HTML content of the article
@@ -116,10 +150,46 @@ suspend fun scrapeArticle(articleLink: String): String {
 		}
 	}
 
+	// Save real article HTML for debugging (it's overwritten on subsequent calls of scrapeArticle())
+	File("tmp/article.html").bufferedWriter().use { out -> out.write(actualArticleText) }
+
 	articleDoc = Jsoup.parse("<body>" + actualArticleText + "</body>")
 
+	// Top-level and child elements have different semantics so that's why
+	// there is processing in this loop and also parseInnerHtmlToMd()
 	for (elm in articleDoc.select("body > *")) {
-		parsedArticle += parseInnerHtmlToMd(elm)
+		val tn = elm.tagName()
+		when (tn) {
+			"p" -> {
+				parsedArticle += "\n\n" + parseInnerHtmlToMd(elm)
+			}
+			"ul" -> {
+				parsedArticle += "\n"
+				val children = elm.children()
+				for (point in children) {
+					parsedArticle += "\n* " + parseInnerHtmlToMd(point)
+				}
+				parsedArticle = parsedArticle.slice(0..(parsedArticle.length-1))
+			}
+			"ol" -> {
+				parsedArticle += "\n"
+				val children = elm.children()
+				for (i in children.indices) {
+					parsedArticle += "\n${i+1}. " + parseInnerHtmlToMd(children[i])
+				}
+				parsedArticle = parsedArticle.slice(0..(parsedArticle.length-1))
+			}
+			"h1", "h2", "h3", "h4", "h5", "h6" -> {
+				parsedArticle += "\n\n" + "#".repeat(tn[1].digitToInt()) + " " + elm.text()
+			}
+			"div", "blockquote" -> {
+				if (tn == "div" && !elm.hasClass("pullquote")) continue
+				parsedArticle += "\n\n>" + parseInnerHtmlToMd(elm)
+			}
+			else -> {
+				parsedArticle += "Unsupported top-level element: ${elm.tagName()}"
+			}
+		}
 	}
 
 	return parsedArticle
