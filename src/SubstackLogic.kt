@@ -5,6 +5,7 @@ import java.time.LocalDateTime
 import java.time.ZonedDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.security.MessageDigest
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -13,65 +14,82 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.json.JSONObject
 
+private val BASE_OUTPUT_PATH = "./tmp"
+
 private val DATE_RE = Regex("(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (0?[1-9]|[12][0-9]|3[01]), \\d{4}")
 private val DATE_RE_2 = Regex("(0[1-9]|1[0-2])\\.(0[1-9]|[12][0-9]|3[01])\\.(\\d{2}|\\d{4})")
 private val DATE_RE_3 = Regex("\\\"post_date\\\":\\\"(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z)\\\"") // last resort
 
 // Parse the inner HTML of an element to markdown
 fun parseInnerHtmlToMd(elm: Element): String {
+	// .children() returns HTML element children only
 	val children = elm.children()
 	if (children.size == 0) return elm.text()
-	var res = ""
+	val res = MutableList<String>(elm.childNodeSize()) {""}
+	// Parse only text nodes here
+	for (node in elm.childNodes()) {
+		if (node.normalName() == "#text") {
+			res[node.siblingIndex()] = node.nodeValue()
+		}
+	}
+	// Parse the proper element children
 	for (child in children) {
+		val i = child.siblingIndex()
 		when (child.tagName()) {
 			"p" -> {
-				res += parseInnerHtmlToMd(child) + "\n"
+				res[i] = parseInnerHtmlToMd(child) + "\n"
+			}
+			"br" -> {
+				res[i] = "\n"
 			}
 			"span" -> {
-				res += child.text()
+				res[i] = child.text()
 			}
 			"strong", "h1", "h2", "h3", "h4", "h5", "h6" -> {
 				val parsedBoldText = parseInnerHtmlToMd(child)
-				res += if (parsedBoldText.endsWith(" ")) "**${parsedBoldText.slice(0..(parsedBoldText.length-1))}** " else
+				res[i] += if (parsedBoldText.endsWith(" ")) "**${parsedBoldText.slice(0..(parsedBoldText.length-1))}** " else
 					"**$parsedBoldText**"
 			}
 			"em" -> {
 				val parsedItalicText = parseInnerHtmlToMd(child)
-				res += if (parsedItalicText.endsWith(" ")) "*${parsedItalicText.slice(0..(parsedItalicText.length-1))}* " else
+				res[i] += if (parsedItalicText.endsWith(" ")) "*${parsedItalicText.slice(0..(parsedItalicText.length-1))}* " else
 					"*$parsedItalicText*"
 			}
 			"s" -> {
 				val parsedStrikeText = parseInnerHtmlToMd(child)
-				res += if (parsedStrikeText.endsWith(" ")) "*${parsedStrikeText.slice(0..(parsedStrikeText.length-1))}* " else
+				res[i] += if (parsedStrikeText.endsWith(" ")) "*${parsedStrikeText.slice(0..(parsedStrikeText.length-1))}* " else
 					"*$parsedStrikeText*"
 			}
 			"code", "pre" -> {
 				val codeText = child.text()
-				res += if (codeText.endsWith(" ")) "`$codeText` " else "`$codeText`"
+				res[i] += if (codeText.endsWith(" ")) "`$codeText` " else "`$codeText`"
 			}
 			"ul" -> {
 				val points = child.children()
 				for (point in points) {
-					res += "  *" + parseInnerHtmlToMd(point).trim() + "\n"
+					res[i] += "\n  *" + parseInnerHtmlToMd(point).trim() + "\n"
 				}
-				res = res.slice(0..(res.length-1)) // remove trailing \n
+				res[i] = res[i].slice(0..(res[i].length-1)) // remove trailing \n
 			}
 			"ol" -> {
 				val points = child.children()
 				for (i in points.indices) {
-					res += "  ${i+1}." + parseInnerHtmlToMd(points[i]).trim() + "\n"
+					res[i] += "  ${i+1}." + parseInnerHtmlToMd(points[i]).trim() + "\n"
 				}
-				res = res.slice(0..(res.length-1)) // remove trailing \n
+				res[i] = res[i].slice(0..(res[i].length-1)) // remove trailing \n
 			}
 			"blockquote" -> {
-				res += ">" + parseInnerHtmlToMd(child)
+				res[i] += ">" + parseInnerHtmlToMd(child)
+			}
+			"a" -> {
+				res[i] = "[${parseInnerHtmlToMd(child)}](${child.attr("href")})"
 			}
 			else -> {
-				res += "\nUnsupported child element tag name: ${child.tagName()}"
+				res[i] += "\nUnsupported child element tag name: ${child.tagName()}"
 			}
 		}
 	}
-	return res
+	return res.joinToString("")
 }
 
 suspend fun scrapeArticle(articleLink: String): String {
@@ -167,17 +185,15 @@ suspend fun scrapeArticle(articleLink: String): String {
 				parsedArticle += "\n"
 				val children = elm.children()
 				for (point in children) {
-					parsedArticle += "\n* " + parseInnerHtmlToMd(point)
+					parsedArticle += "\n* " + parseInnerHtmlToMd(point).trim()
 				}
-				parsedArticle = parsedArticle.slice(0..(parsedArticle.length-1))
 			}
 			"ol" -> {
 				parsedArticle += "\n"
 				val children = elm.children()
 				for (i in children.indices) {
-					parsedArticle += "\n${i+1}. " + parseInnerHtmlToMd(children[i])
+					parsedArticle += "\n${i+1}. " + parseInnerHtmlToMd(children[i]).trim()
 				}
-				parsedArticle = parsedArticle.slice(0..(parsedArticle.length-1))
 			}
 			"h1", "h2", "h3", "h4", "h5", "h6" -> {
 				parsedArticle += "\n\n" + "#".repeat(tn[1].digitToInt()) + " " + elm.text()
@@ -195,10 +211,23 @@ suspend fun scrapeArticle(articleLink: String): String {
 	return parsedArticle
 }
 
+// This assumes that BASE_OUTPUT_PATH already exists (to avoid checking it multiple times)
+fun saveArticleToDisk(articleId: String, articleMarkdown: String) {
+	val msgDig = MessageDigest.getInstance("SHA-256")
+	msgDig.update(articleId.toByteArray())
+	val hash = msgDig.digest().joinToString("") {"%02x".format(it)}
+	if (!File(BASE_OUTPUT_PATH).isDirectory()) throw Exception("BASE_OUTPUT_PATH is not a directory: $BASE_OUTPUT_PATH")
+	val thisArticleOutputPath = File("${BASE_OUTPUT_PATH}/${hash[0]}/${hash[1]}/")
+	if (!thisArticleOutputPath.isDirectory()) thisArticleOutputPath.mkdirs()
+	File("${BASE_OUTPUT_PATH}/${hash[0]}/${hash[1]}/$hash.md").bufferedWriter().use { out -> out.write(articleMarkdown) }
+}
+
 suspend fun main() {
 	println("Starting main()...")
 	// Scrape random article from Substack, to showcase and test scrapeArticle()
 	println("Running scrapeArticle()...")
-	val returned = scrapeArticle("https://read.technically.dev/p/technically-monthly-september-2025")
-	println("Returned value from scrapeArticle():\n$returned")
+	val articleMd = scrapeArticle("https://read.technically.dev/p/technically-monthly-september-2025")
+	println("Returned value from scrapeArticle():\n$articleMd")
+	println("Saving article to disk...")
+	saveArticleToDisk("test id", articleMd)
 }
