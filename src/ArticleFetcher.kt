@@ -11,11 +11,22 @@ import java.net.URI
 import java.util.zip.GZIPInputStream
 import kotlin.jvm.optionals.getOrNull
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.async
 
 data class HttpRequestSummary(val statusCode: Short, val headers: Map<String, List<String>>, val text: String) {}
+
+// A global logger class that can collect messages from the various scraping functions in memory
+// Useful for the webserver to display output to the user
+class LoggerClass(var preserveLogsInMemory: Boolean) {
+	var log: String = ""
+
+	fun addLog(msg: String) {
+		if (preserveLogsInMemory) log += msg
+		println(msg)
+	}
+}
+
+val Logger = LoggerClass(true)
 
 val HTTP_HEADERS = mapOf(
 	"User-Agent" to "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
@@ -33,7 +44,7 @@ val HTTP_HEADERS = mapOf(
 )
 
 // Basic implementation of an HTTP2 request
-private suspend fun http2Request(url: String): HttpRequestSummary {
+private fun http2Request(url: String): HttpRequestSummary {
 	val cookieManager = CookieHandler.getDefault()
 	if (cookieManager == null) {
 		val newCookieManager = CookieManager()
@@ -76,20 +87,20 @@ private suspend fun http2Request(url: String): HttpRequestSummary {
 }
 
 // Custom HTTP2 request with cookies and re-try support
+// This will block so it must be called in, e.g., coroutineScope {}
 suspend fun customHttp2Request(url: String, retry: Boolean = true): HttpRequestSummary {
-	// New cookies
-	val cookieManager = CookieManager()
-	CookieHandler.setDefault(cookieManager)
-	cookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ALL)
-
-	val httpResp = coroutineScope { async { http2Request(url) }.await() }
+	val httpResp = http2Request(url)
 	if (httpResp.statusCode == 429.toShort() && retry) {
-		println("Got a 429 status code! Retrying in 10s with new cookies...")
+		Logger.addLog("Got a 429 status code! Retrying in 10s with new cookies...")
 		delay(10000)
+		// New cookies
+		val cookieManager = CookieManager()
+		CookieHandler.setDefault(cookieManager)
+		cookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ALL)
 		return customHttp2Request(url, false)
 	} else if (httpResp.statusCode != 200.toShort() && httpResp.statusCode != 403.toShort()) { // Some private substacks return 403
-		println("Start HTTP response from failing request")
-		println(httpResp.text)
+		Logger.addLog("Start HTTP response from failing request")
+		Logger.addLog(httpResp.text)
 		throw Exception("Unrecognized status code [$url]: ${httpResp.statusCode}")
 	}
 	return httpResp

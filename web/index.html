@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Substack scraping</title>
+<style>
+body {
+	font-family: "Arial";
+	background: #eee;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+	width: 100vw;
+	height: 100vh;
+	padding: 0;
+	margin: 0;
+}
+
+button {
+	font-weight: bold;
+	font-size: 90px;
+	padding: 48px;
+	background: none;
+	border: none;
+	cursor: pointer;
+	color: white;
+}
+
+div#btn {
+	background: #ff9100;
+	border-radius: 60px;
+	width: fit-content;
+	height: fit-content;
+	transition: all 0.2s ease;
+	box-shadow: 0 0 10px 10px lightgrey;
+}
+
+div#btn:hover {
+	background: #db7d00;
+}
+
+div#log {
+	position: fixed;
+	top: 10px;
+	right: 10px;
+	height: calc(100vh - 20px);
+	width: 250px;
+	background: #bbb;
+	border-radius: 18px;
+	overflow: hidden scroll;
+	padding: 15px;
+	box-sizing: border-box;
+	font-family: "Monospace";
+	font-size: 12px;
+}
+
+div#log p:first-child {
+	text-align: center;
+	font-weight: bold;
+	font-size: 20px;
+	margin-top: 0;
+}
+
+div#log > p.err {
+	color: red
+}
+
+/* control messages */
+div#log > p.ctl {
+	color: blue
+}
+
+textarea {
+	position: fixed;
+	top: 10px;
+	left: 10px;
+	width: 200px;
+	height: 200px;
+	resize: vertical;
+}
+
+</style>
+</head>
+	<body>
+		<textarea placeholder="Enter category numbers, one on each line with an optional comment after">Loading...</textarea>
+		<div id="btn">
+			<button onclick="startScraping()">Update</button>
+		</div>
+<!-- 		<p>Status: idle</p> -->
+		<div id="log">
+			<p>System log</p>
+		</div>
+	</body>
+<script>
+async function main() {
+	const req = await fetch("/categories")
+	const text = await req.text()
+	document.getElementsByTagName("textarea")[0].value = text
+}
+
+async function startScraping() {
+	var req = await fetch("/categories", { method: "PUT", body: document.getElementsByTagName("textarea")[0].value })
+	var text = await req.text()
+	if (req.status >= 300) {
+		return alert(`Error sending categories! HTTP Code ${req.status}. Possibly helpful error text: ${text}`)
+	}
+
+	req = await fetch("/start-scraping", { method: "POST" })
+	text = await req.text()
+	if (req.status >= 300) {
+		return alert(`Error starting scraping! HTTP Code ${req.status}. ${text}`)
+	}
+
+	const ws = new WebSocket("/")
+	ws.onmessage = function (message) {
+		const m = message.data
+		if (m.startsWith("l")) {
+			document.getElementById("log").innerHTML += m.slice(1)
+		} else if (m.startsWith("e")) {
+			alert(`WebSocket returned an error: ${m.slice(1)}`)
+		} else if (m.startsWith("t")) {
+			document.getElementById("log").innerHTML = m.slice(1)
+		}
+	}
+
+	ws.onclose = function () {
+		document.getElementById("log").innerHTML += "<p class='ctl'>Disconnected from server WebSocket! Please try realod page</p>"
+	}
+}
+
+main()
+</script>
+</html>

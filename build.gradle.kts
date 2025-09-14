@@ -33,6 +33,18 @@ sourceSets.main {
 }
 
 application {
-	mainClass = "SubstackLogicKt"
+	mainClass = "WebserverKt"
 	applicationDefaultJvmArgs = listOf("-Dkotlinx.coroutines.debug")
+}
+
+tasks.register("runScrape") {
+	// Change the entrypoint of the application if the CLI scraping functionality is requested
+	application.mainClass = "substacklogic.SubstackLogicKt"
+	dependsOn("run")
+}
+
+tasks.register("buildScrape") {
+	// Change the entrypoint of the application if the CLI scraping functionality is requested
+	application.mainClass = "substacklogic.SubstackLogicKt"
+	dependsOn("build")
 }

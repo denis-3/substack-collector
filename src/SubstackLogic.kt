@@ -1,4 +1,7 @@
+package substacklogic
+
 import articlefetcher.customHttp2Request
+import articlefetcher.Logger
 import java.io.File
 import java.text.SimpleDateFormat
 import java.time.LocalDateTime
@@ -10,18 +13,48 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.async
+import kotlinx.coroutines.Dispatchers
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.json.JSONObject
+import org.json.JSONArray
 
 private val BASE_OUTPUT_PATH = "./tmp"
 
 private val DATE_RE = Regex("(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (0?[1-9]|[12][0-9]|3[01]), \\d{4}")
 private val DATE_RE_2 = Regex("(0[1-9]|1[0-2])\\.(0[1-9]|[12][0-9]|3[01])\\.(\\d{2}|\\d{4})")
 private val DATE_RE_3 = Regex("\\\"post_date\\\":\\\"(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z)\\\"") // last resort
+private val HELP_TEXT = """Command line options:
+  article [articleUrl]                  Get a particular article by its link. Example: article https://read.technically.dev/p/whats-javascript
+  authorSubdomain [author's subdomain]  Get articles from an author's subdomain. For example, "authorSubdomain marketsentiment" will get articles from marketsentiment.substack.com
+  category [category ID]                Get articles from the top 100 rising authors in a category based on its ID. To get articles from the technology category (which has an ID of 4), use "category 4"
+  all                                   Get all categories as defined in a categories.txt file
+
+To make this work with Gradle, use its --args switch: gradle run --args "category 62" will invoke this class to get articles from category ID 62 (Business)"""
+
+// Convenience extension function
+private fun File.writeStr(str: String) = this.bufferedWriter().use { out -> out.write(str) }
+
+// "Article ID" is the numeric or text identifier used by Substack
+// Split the URL based on these possible strings: /p/ /p-  /cp/  /cp-
+private fun articleIdFromUrl(articleUrl: String) =
+	when {
+		articleUrl.contains("/p/") -> articleUrl.split("/p/")[1]
+		articleUrl.contains("/p-") -> articleUrl.split("/p-")[1]
+		articleUrl.contains("/cp/") -> articleUrl.split("/cp/")[1]
+		articleUrl.contains("/cp-") -> articleUrl.split("/cp-")[1]
+		else -> throw Exception("Can't get ID from article URL: $articleUrl")
+	}
+
+// Convenience hashing function
+private fun sha256(inp: String): String {
+	val msgDig = MessageDigest.getInstance("SHA-256")
+	msgDig.update(inp.toByteArray())
+	return msgDig.digest().joinToString("") {"%02x".format(it)}
+}
 
 // Parse the inner HTML of an element to markdown
-fun parseInnerHtmlToMd(elm: Element): String {
+private fun parseInnerHtmlToMd(elm: Element): String {
 	// .children() returns HTML element children only
 	val children = elm.children()
 	if (children.size == 0) return elm.text()
@@ -67,14 +100,14 @@ fun parseInnerHtmlToMd(elm: Element): String {
 			"ul" -> {
 				val points = child.children()
 				for (point in points) {
-					res[i] += "\n  *" + parseInnerHtmlToMd(point).trim() + "\n"
+					res[i] += "\n *" + parseInnerHtmlToMd(point).trim() + "\n"
 				}
 				res[i] = res[i].slice(0..(res[i].length-1)) // remove trailing \n
 			}
 			"ol" -> {
 				val points = child.children()
-				for (i in points.indices) {
-					res[i] += "  ${i+1}." + parseInnerHtmlToMd(points[i]).trim() + "\n"
+				for (ii in points.indices) {
+					res[i] += " ${ii+1}." + parseInnerHtmlToMd(points[ii]).trim() + "\n"
 				}
 				res[i] = res[i].slice(0..(res[i].length-1)) // remove trailing \n
 			}
@@ -93,11 +126,12 @@ fun parseInnerHtmlToMd(elm: Element): String {
 }
 
 suspend fun scrapeArticle(articleLink: String): String {
-	println("Scraping $articleLink...")
-	val webResult = coroutineScope { async { customHttp2Request(articleLink) }.await() }
+	Logger.addLog("Scraping $articleLink...")
+	val webResult = customHttp2Request(articleLink)
 
 	// Save article HTML for debugging (it's overwritten on subsequent calls of scrapeArticle())
-	File("tmp/article.html").bufferedWriter().use { out -> out.write(webResult.text) }
+	val tmpArticleFile = File("tmp/article.html")
+	tmpArticleFile.writeStr(webResult.text)
 	var articleDoc = Jsoup.parse(webResult.text)
 
 	// Get header, author, and date first
@@ -147,10 +181,8 @@ suspend fun scrapeArticle(articleLink: String): String {
 	// Get the real HTML content of the article
 	// Need a special API for some posts
 	if (articleLink.startsWith("https://substack.com/home/post/p-")) {
-		val apiResult = coroutineScope { async {
-			// "https://substack.com/home/post/p-".length == 33
-			customHttp2Request("https://substack.com/api/v1/posts/by-id/" + articleLink.slice(33..articleLink.length))
-		}.await() }
+		// "https://substack.com/home/post/p-".length == 33
+		val apiResult = customHttp2Request("https://substack.com/api/v1/posts/by-id/" + articleLink.slice(33..articleLink.length))
 		val actualArticleTextNull = JSONObject(apiResult.text).getJSONObject("post").getString("body_html")
 		if (actualArticleTextNull == null) throw Exception("No post.body_html field in Substack post API response!")
 		actualArticleText = actualArticleTextNull
@@ -169,7 +201,7 @@ suspend fun scrapeArticle(articleLink: String): String {
 	}
 
 	// Save real article HTML for debugging (it's overwritten on subsequent calls of scrapeArticle())
-	File("tmp/article.html").bufferedWriter().use { out -> out.write(actualArticleText) }
+	tmpArticleFile.writeStr(actualArticleText)
 
 	articleDoc = Jsoup.parse("<body>" + actualArticleText + "</body>")
 
@@ -200,34 +232,126 @@ suspend fun scrapeArticle(articleLink: String): String {
 			}
 			"div", "blockquote" -> {
 				if (tn == "div" && !elm.hasClass("pullquote")) continue
-				parsedArticle += "\n\n>" + parseInnerHtmlToMd(elm)
+				parsedArticle += "\n\n> " + parseInnerHtmlToMd(elm).trim().split("\n").joinToString("\n>")
 			}
 			else -> {
 				parsedArticle += "Unsupported top-level element: ${elm.tagName()}"
 			}
 		}
 	}
-
 	return parsedArticle
 }
 
-// This assumes that BASE_OUTPUT_PATH already exists (to avoid checking it multiple times)
-fun saveArticleToDisk(articleId: String, articleMarkdown: String) {
-	val msgDig = MessageDigest.getInstance("SHA-256")
-	msgDig.update(articleId.toByteArray())
-	val hash = msgDig.digest().joinToString("") {"%02x".format(it)}
+private suspend fun saveArticleToDisk(articleUid: String, articleMarkdown: String) {
+	val hash = sha256(articleUid)
 	if (!File(BASE_OUTPUT_PATH).isDirectory()) throw Exception("BASE_OUTPUT_PATH is not a directory: $BASE_OUTPUT_PATH")
 	val thisArticleOutputPath = File("${BASE_OUTPUT_PATH}/${hash[0]}/${hash[1]}/")
 	if (!thisArticleOutputPath.isDirectory()) thisArticleOutputPath.mkdirs()
-	File("${BASE_OUTPUT_PATH}/${hash[0]}/${hash[1]}/$hash.md").bufferedWriter().use { out -> out.write(articleMarkdown) }
+	File("${BASE_OUTPUT_PATH}/${hash[0]}/${hash[1]}/$hash.md").writeStr(articleMarkdown)
 }
 
-suspend fun main() {
-	println("Starting main()...")
-	// Scrape random article from Substack, to showcase and test scrapeArticle()
-	println("Running scrapeArticle()...")
-	val articleMd = scrapeArticle("https://read.technically.dev/p/technically-monthly-september-2025")
-	println("Returned value from scrapeArticle():\n$articleMd")
-	println("Saving article to disk...")
-	saveArticleToDisk("test id", articleMd)
+suspend fun getArticlesFromAuthor(authorSubdomain: String, maxLimit: Int): Set<String> {
+	Logger.addLog("Getting articles from $authorSubdomain...")
+	val articles = mutableSetOf<String>()
+	var offset = 0
+	while (articles.size < maxLimit && offset < 300) { // hard-stop at offset 300
+		delay(750) // Avoid calling the API too quickly
+		val apiResult = customHttp2Request("https://$authorSubdomain.substack.com/api/v1/archive?sort=new&search=&offset=$offset&limit=20")
+		if (apiResult.text.length < 10) break // For a short response, assume we're done
+		val apiArticles = JSONArray(apiResult.text)
+		val apiArticlesLength = apiArticles.length()
+		for (i in 0..<apiArticlesLength) {
+			val thisArticleObj = apiArticles.getJSONObject(i)
+			if (thisArticleObj.getString("audience") == "everyone" && thisArticleObj.getString("type") != "podcast") {
+				articles.add(thisArticleObj.getString("canonical_url"))
+			}
+		}
+		offset += 20
+	}
+	return articles
+}
+
+suspend fun downloadArticlesFromAuthor(authorSubdomain: String, maxLimit: Int, skipExisting: Boolean = false) {
+	val articles = getArticlesFromAuthor(authorSubdomain, maxLimit)
+	for (articleUrl in articles) {
+		val articleUid = authorSubdomain + "/" + articleIdFromUrl(articleUrl)
+		if (skipExisting) {
+			val artHash = sha256(articleUid)
+			if (File("$BASE_OUTPUT_PATH/${artHash[0]}/${artHash[1]}/${artHash}.md").isFile()) {
+				Logger.addLog("Skipping article $articleUid because it already exists...")
+				continue
+			}
+		}
+		val articleMd = scrapeArticle(articleUrl)
+		saveArticleToDisk(articleUid, articleMd)
+	}
+}
+
+suspend fun getRisingSubdomains(categoryId: Int): Set<String> {
+	Logger.addLog("Getting rising authors for category $categoryId...")
+	val authors = mutableSetOf<String>()
+	var page = 0;
+	var more = true
+	while (more) {
+		val apiResult = customHttp2Request("https://substack.com/api/v1/category/leaderboard/$categoryId/trending?page=$page")
+		val apiJson = JSONObject(apiResult.text)
+		val apiAuthors = apiJson.getJSONArray("items")
+		val apiAuthorsLength = apiAuthors.length()
+		for (i in 0..<apiAuthorsLength) {
+			val pub = apiAuthors.getJSONObject(i).getJSONObject("publication")
+			if (pub.getString("language") == "en") {
+				authors.add(pub.getString("subdomain"))
+			}
+		}
+		page ++
+		more = apiJson.getBoolean("more")
+	}
+	return authors
+}
+
+suspend fun downloadArticlesByCategory(categoryId: Int, maxLimitPerAuthor: Int = 50) {
+	val authors = getRisingSubdomains(categoryId)
+	for (author in authors) {
+		downloadArticlesFromAuthor(author, maxLimitPerAuthor, true)
+	}
+}
+
+// Parses a simple text format where each line has a number and then optional text after a space
+// Returns set of categories (bad lines are ignored)
+fun parseCategoriesTextSpec(inp: String): Set<Int> {
+	val categories = mutableSetOf<Int>()
+	for (line in inp.split("\n")) {
+		if (line.toIntOrNull() != null) categories.add(line.toInt())
+		val spaceIndex = line.indexOf(" ")
+		val sliced = line.slice(0..<spaceIndex)
+		if (sliced.toIntOrNull() != null) {
+			categories.add(sliced.toInt())
+		}
+	}
+	return categories
+}
+
+suspend fun downloadSelectedCategories(maxLimitPerAuthor: Int = 50) {
+	val categories = parseCategoriesTextSpec(File("categories.txt").bufferedReader().use { it.readText() })
+	for (category in categories) {
+		downloadArticlesByCategory(category, maxLimitPerAuthor)
+	}
+}
+
+suspend fun main(args: Array<String>) = coroutineScope {
+	Logger.preserveLogsInMemory = false
+	if (args.size == 1 && args[0] == "all") {
+		launch { downloadSelectedCategories(50) }.join()
+	} else if (args.size == 0 || args.size > 2) {
+		println(HELP_TEXT)
+	} else {
+		when (args[0]) {
+			"article" -> {
+				println(async { scrapeArticle(args[1]) }.await())
+			}
+			else -> {
+				println(HELP_TEXT)
+			}
+		}
+	}
 }
