@@ -21,7 +21,7 @@ class LoggerClass(var preserveLogsInMemory: Boolean) {
 	var log: String = ""
 
 	fun addLog(msg: String) {
-		if (preserveLogsInMemory) log += msg
+		if (preserveLogsInMemory) log += msg + "\n"
 		println(msg)
 	}
 }

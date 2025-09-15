@@ -2,7 +2,6 @@
 .kotlin
 
 build
-tmp
 data
 
 categories.txt

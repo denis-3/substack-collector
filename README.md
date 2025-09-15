@@ -6,7 +6,10 @@ A simple (soon-to-be) app for downloading and storing articles in markdown. This
 
 1. Download [OpenJDK 24](https://jdk.java.net/24/), [Kotlin](https://kotlinlang.org/docs/command-line.html), and the [Gradle build system](https://gradle.org/install/).
 2. `cd` into the root of this repo.
-3. Run `gradle run`. For now, this will simply test some of the functions in `src/SubstackLogic.kt` and `src/ArticleFetcher.kt`.
+3. Make sure to have a valid file at `resources/categories.txt`. You can copy the default `/resources/categories-sample.txt` one or make your own.
+4. Run `gradle run`. This will run the webserver on port `6237` by default. To visit the server's webpage, go to `localhost:6237` in your browser.
+
+*Note:* To run the scraping CLI instead, use `gradle runScrape --args "<your args here>"`, making sure to replace `<your args here>` with valid CLI arguments for the tool. Run `gradle runScrape --args "help"` for help on that.
 
 ## Dependencies
 

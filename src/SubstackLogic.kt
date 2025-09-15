@@ -19,7 +19,7 @@ import org.jsoup.nodes.Element
 import org.json.JSONObject
 import org.json.JSONArray
 
-private val BASE_OUTPUT_PATH = "./tmp"
+private val BASE_OUTPUT_PATH = "./data"
 
 private val DATE_RE = Regex("(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (0?[1-9]|[12][0-9]|3[01]), \\d{4}")
 private val DATE_RE_2 = Regex("(0[1-9]|1[0-2])\\.(0[1-9]|[12][0-9]|3[01])\\.(\\d{2}|\\d{4})")
@@ -130,7 +130,7 @@ suspend fun scrapeArticle(articleLink: String): String {
 	val webResult = customHttp2Request(articleLink)
 
 	// Save article HTML for debugging (it's overwritten on subsequent calls of scrapeArticle())
-	val tmpArticleFile = File("tmp/article.html")
+	val tmpArticleFile = File("$BASE_OUTPUT_PATH/article.html")
 	tmpArticleFile.writeStr(webResult.text)
 	var articleDoc = Jsoup.parse(webResult.text)
 
@@ -332,7 +332,7 @@ fun parseCategoriesTextSpec(inp: String): Set<Int> {
 }
 
 suspend fun downloadSelectedCategories(maxLimitPerAuthor: Int = 50) {
-	val categories = parseCategoriesTextSpec(File("categories.txt").bufferedReader().use { it.readText() })
+	val categories = parseCategoriesTextSpec(File("resources/categories.txt").bufferedReader().use { it.readText() })
 	for (category in categories) {
 		downloadArticlesByCategory(category, maxLimitPerAuthor)
 	}
@@ -348,6 +348,12 @@ suspend fun main(args: Array<String>) = coroutineScope {
 		when (args[0]) {
 			"article" -> {
 				println(async { scrapeArticle(args[1]) }.await())
+			}
+			"authorSubdomain" -> {
+				launch { downloadArticlesFromAuthor(args[1], 50) }.join()
+			}
+			"category" -> {
+				launch { downloadArticlesByCategory(args[1].toInt()) }.join()
 			}
 			else -> {
 				println(HELP_TEXT)

@@ -72,10 +72,18 @@ div#log > p.ctl {
 	color: blue
 }
 
-textarea {
+#categories-container {
 	position: fixed;
 	top: 10px;
 	left: 10px;
+
+}
+
+#categories-container > p {
+	width: 200px;
+}
+
+textarea {
 	width: 200px;
 	height: 200px;
 	resize: vertical;
@@ -84,7 +92,10 @@ textarea {
 </style>
 </head>
 	<body>
-		<textarea placeholder="Enter category numbers, one on each line with an optional comment after">Loading...</textarea>
+		<div id="categories-container">
+			<p>Enter category numbers here, one on each line with an optional comment after</p>
+			<textarea placeholder="1 Example category with ID of one">Loading...</textarea>
+		</div>
 		<div id="btn">
 			<button onclick="startScraping()">Update</button>
 		</div>
@@ -94,10 +105,36 @@ textarea {
 		</div>
 	</body>
 <script>
+const sysLogBox = document.getElementById("log")
+
 async function main() {
 	const req = await fetch("/categories")
 	const text = await req.text()
 	document.getElementsByTagName("textarea")[0].value = text
+	streamLogs()
+}
+
+function millis(m) {
+	return new Promise((resolve) => {
+		setTimeout(() => {
+			resolve()
+		}, m)
+	})
+}
+
+async function streamLogs() {
+	var logsDone = false
+	while (!logsDone) {
+		req = await fetch("/logs")
+		// Logs for the run are done once non-success is reached
+		if (req.status >= 300) {
+			logsDone = true
+		} else {
+			const log = await req.text()
+			sysLogBox.innerHTML = "<p>System log</p><p>" + log.split("\n").join("</p><p>") + "</p>"
+		}
+		await millis(5000)
+	}
 }
 
 async function startScraping() {
@@ -112,22 +149,9 @@ async function startScraping() {
 	if (req.status >= 300) {
 		return alert(`Error starting scraping! HTTP Code ${req.status}. ${text}`)
 	}
-
-	const ws = new WebSocket("/")
-	ws.onmessage = function (message) {
-		const m = message.data
-		if (m.startsWith("l")) {
-			document.getElementById("log").innerHTML += m.slice(1)
-		} else if (m.startsWith("e")) {
-			alert(`WebSocket returned an error: ${m.slice(1)}`)
-		} else if (m.startsWith("t")) {
-			document.getElementById("log").innerHTML = m.slice(1)
-		}
-	}
-
-	ws.onclose = function () {
-		document.getElementById("log").innerHTML += "<p class='ctl'>Disconnected from server WebSocket! Please try realod page</p>"
-	}
+	sysLogBox.innerHTML = "<p>System log</p>"
+	// Periodically fetch data
+	streamLogs()
 }
 
 main()

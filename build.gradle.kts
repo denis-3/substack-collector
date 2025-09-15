@@ -29,10 +29,12 @@ dependencies {
 }
 
 sourceSets.main {
-	java.setSrcDirs(listOf("./src"))
+	java.srcDir("src")
+	resources.srcDir("resources")
 }
 
 application {
+	// The default main class is the webserver
 	mainClass = "WebserverKt"
 	applicationDefaultJvmArgs = listOf("-Dkotlinx.coroutines.debug")
 }

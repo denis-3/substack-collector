@@ -1,0 +1,7 @@
+Note: This is the reference format for the resources/categories.txt file.
+Lines that start with a number will have that category's articles downloaded from Substack
+You can copy this file to resources/categories.txt to get started!
+
+4 Tech
+62 Business
+76739 US Politics
