@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Substack scraping</title>
+<style>
+body {
+	font-family: "Arial";
+	background: rgb(250, 250, 250);
+	width: 100vw;
+	height: 100vh;
+	padding: 24px;
+	margin: 0;
+	box-sizing: border-box;
+}
+
+textarea#categories-input {
+	width: 240px;
+	height: 200px;
+	resize: vertical;
+	border: 1px solid grey;
+	border-radius: 10px;
+	padding: 14px;
+	box-shadow: 0 0 8px 1px rgb(230, 230, 230);
+	margin: 15px 0 15px;;
+	box-sizing: border-box;
+}
+
+textarea#categories-input + button {
+	width: 240px;
+	background: white;
+	border-radius: 10px;
+	border: 1px solid grey;
+	box-shadow: 0 0 8px 1px rgb(230, 230, 230);
+	transition: background 0.2s ease;
+	padding: 10px 14px;
+	display: block;
+	cursor: pointer;
+}
+
+textarea#categories-input + button:hover {
+	background: rgb(244, 244, 244);
+}
+</style>
+</head>
+	<body>
+		<h1>System configuration</h1>
+		<h2>Categories</h2>
+		<p>Enter category numbers here, one on each line with an optional comment after</p>
+		<textarea id="categories-input" placeholder="1 Example category with ID of one">Loading...</textarea>
+		<button onclick="updateCategories()">Update Categories</button>
+		<h2>Article Search</h2>
+		<p>Enter a term to search for articles. Keywords will match in the article title, subtitle, and body.</p>
+	</body>
+<script>
+const categoriesInput = document.getElementById("categories-input")
+async function fetchCategories() {
+	const req = await fetch("/categories")
+	const text = await req.text()
+	if (req.status >= 300) {
+		alert(`Error fetching categories! HTTP code ${req.status}. ${text}`)
+		categoriesInput.value = ""
+		return
+	}
+	categoriesInput.value = text
+}
+
+async function updateCategories() {
+	const newCategories = categoriesInput.value.trim()
+	if (newCategories == "") return alert("New categories can't be empty or blank!")
+	const req = await fetch("/categories", {
+		method: "PUT",
+		headers: { "Content-Type": "text/plain; charset=UTF-8" },
+		body: newCategories
+	})
+
+	if (req.status >= 300) {
+		const text = await req.text()
+		alert(`Failed to set new categories. HTTP code ${req.status}. ${text}`)
+	}
+}
+
+fetchCategories()
+</script>
+</html>

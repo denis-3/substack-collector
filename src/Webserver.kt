@@ -1,6 +1,7 @@
 import coroutineexecutor.CoroutineExecutor
 import articlefetcher.Logger
 import substacklogic.downloadSelectedCategories
+import substacklogic.getTopArticlesByKeyword
 import com.sun.net.httpserver.HttpServer
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler
@@ -8,6 +9,13 @@ import java.io.File
 import java.net.InetSocketAddress
 import kotlinx.coroutines.runBlocking
 
+// Map of paths to files and content-type (only supports GET)
+private val FILE_PATHS_MAP = mapOf<String, List<String>>(
+	"/" to listOf("resources/web/index.html", "text/html; charset=UTF-8"),
+	"/config" to listOf("resources/web/config.html", "text/html; charset=UTF-8"),
+	"/categories" to listOf("resources/categories.txt", "text/plain; charset=UTF-8"),
+	"/settings.svg" to listOf("resources/web/settings.svg", "image/svg+xml")
+)
 // buffer size for reading HTTP body
 private val BUFFER_SIZE = 1024
 // 10 KiB max request size
@@ -69,29 +77,42 @@ class HomePageHandler() : HttpHandler {
 		val reqMethod = exchange.requestMethod
 		when (reqMethod) {
 			"GET" -> {
-				when (path) {
-					"/" -> {
-						val indexFile = File("./resources/web/index.html").bufferedReader().use { it.readText() }
-						return exchange.sendStringAndClose(200,
-							mapOf("Content-Type" to "text/html; charset=UTF-8"),
-							indexFile)
+				if (path in FILE_PATHS_MAP) {
+					val (fileName, contentType) = FILE_PATHS_MAP[path]!!
+					val targetFile = File(fileName).bufferedReader().use { it.readText() }
+					return exchange.sendStringAndClose(200,
+						mapOf("Content-Type" to contentType),
+						targetFile)
+				} else if (path == "/logs") {
+					if (!SCRAPING_NOW) {
+						Logger.log = ""
+						// No logs for no job
+						return exchange.sendStringAndClose(404, mapOf(), "")
 					}
-					"/categories" -> {
-						val indexFile = File("./resources/categories.txt").bufferedReader().use { it.readText() }
-						return exchange.sendStringAndClose(200,
-							mapOf("Content-Type" to "text/html; charset=UTF-8"),
-							indexFile)
+					// The first line of logs is the system status
+					val headerStr = (if (SCRAPING_NOW) "Scraping" else "Idle") + "\n"
+					return exchange.sendStringAndClose(200,
+						mapOf("Content-Type" to "text/plain; charset=UTF-8"),
+						headerStr + Logger.log)
+				} else if (path == "/keyword-search") {
+					if (fullURI.contains("&")) {
+						return exchange.sendStringAndClose(400,
+						mapOf("Content-Type" to "text/plain; charset=UTF-8"),
+						"Can't have more than one query param\n")
+					} else if (!fullURI.startsWith("/keyword-search?kws=")) {
+						return exchange.sendStringAndClose(400,
+						mapOf("Content-Type" to "text/plain; charset=UTF-8"),
+						"Must have kws query param as a comma-separated list of keywords\n")
 					}
-					"/logs" -> {
-						if (!SCRAPING_NOW) {
-							Logger.log = ""
-							// No logs for no job
-							return exchange.sendStringAndClose(404, mapOf(), "")
-						}
-						return exchange.sendStringAndClose(200,
-							mapOf("Content-Type" to "text/plain; charset=UTF-8"),
-							Logger.log)
+					val startTime = System.currentTimeMillis()
+					val searchResult: List<Pair<Double, String>> = runBlocking {
+						getTopArticlesByKeyword(fullURI.split("?kws")[1].split(","))
 					}
+					val searchTime = System.currentTimeMillis() - startTime
+					val returnText = searchResult.map { (score, name) -> "$score - $name" }.joinToString("\n")
+					return exchange.sendStringAndClose(400,
+						mapOf("Content-Type" to "text/plain; charset=UTF-8"),
+						"Search time: $searchTime ms\n$returnText\n")
 				}
 			}
 			"PUT" -> {

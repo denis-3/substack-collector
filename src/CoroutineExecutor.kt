@@ -35,6 +35,9 @@ class CoroutineExecutor : ExecutorService {
 		}
 	}
 
+	// MICROSECONDS and NANOSECONDS units with timeouts less than than 1000 and
+	// 1000000, respectively, are expected to result in zero here, which is fine
+	// since the time resolution probably isn't better than 1 ms anyway
 	private fun timeoutToMillis(timeout: Long, timeUnit: TimeUnit): Long {
 		return when (timeUnit) {
 			TimeUnit.DAYS -> timeout * 86_400_000L

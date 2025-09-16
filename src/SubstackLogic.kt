@@ -9,6 +9,7 @@ import java.time.ZonedDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.security.MessageDigest
+import java.lang.Math
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -19,6 +20,8 @@ import org.jsoup.nodes.Element
 import org.json.JSONObject
 import org.json.JSONArray
 
+// Directory where output files will be stored (like downloaded articles)
+// No need for a trailing slash here
 private val BASE_OUTPUT_PATH = "./data"
 
 private val DATE_RE = Regex("(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (0?[1-9]|[12][0-9]|3[01]), \\d{4}")
@@ -234,6 +237,9 @@ suspend fun scrapeArticle(articleLink: String): String {
 				if (tn == "div" && !elm.hasClass("pullquote")) continue
 				parsedArticle += "\n\n> " + parseInnerHtmlToMd(elm).trim().split("\n").joinToString("\n>")
 			}
+			"pre", "code" -> {
+				parsedArticle += "\n\n```\n${elm.text()}\n```"
+			}
 			else -> {
 				parsedArticle += "Unsupported top-level element: ${elm.tagName()}"
 			}
@@ -318,7 +324,7 @@ suspend fun downloadArticlesByCategory(categoryId: Int, maxLimitPerAuthor: Int =
 
 // Parses a simple text format where each line has a number and then optional text after a space
 // Returns set of categories (bad lines are ignored)
-fun parseCategoriesTextSpec(inp: String): Set<Int> {
+private fun parseCategoriesTextSpec(inp: String): Set<Int> {
 	val categories = mutableSetOf<Int>()
 	for (line in inp.split("\n")) {
 		if (line.toIntOrNull() != null) categories.add(line.toInt())
@@ -336,6 +342,52 @@ suspend fun downloadSelectedCategories(maxLimitPerAuthor: Int = 50) {
 	for (category in categories) {
 		downloadArticlesByCategory(category, maxLimitPerAuthor)
 	}
+}
+
+// Get most relevant articles by a query of keywords
+// It returns the list of articles (which is a pair of article score and file name),
+suspend fun getTopArticlesByKeyword(keywords: List<String>, articleCount: Int = 5): List<Pair<Double, String>> {
+	val lowerKeywords = keywords.map { it.lowercase() }
+	val totalKeywordCt = keywords.size
+	// Pair of score, article UID hash
+	val topArticles = MutableList<Pair<Double, String>>(articleCount) { Pair(0.0, "") }
+	// Cursed char range...
+	for (combo in 0..255) {
+		val hex = combo.toHexString(HexFormat {number { minLength = 2; removeLeadingZeros = true } } )
+		val files = File("$BASE_OUTPUT_PATH/${hex[0]}/${hex[1]}").listFiles()
+		if (files != null) {
+			for (file in files) {
+				val fullText = file.bufferedReader().use { it.readText() }
+				// How many keywords are present in the article
+				var keywordInclusionCt = 0
+				var articleScore = 0.0
+				for (kw in lowerKeywords) {
+					var kwCount = 0
+					var latestKwIndex = fullText.indexOf(kw)
+					while (latestKwIndex != -1) {
+						kwCount ++
+						latestKwIndex = fullText.indexOf(kw, latestKwIndex + 1)
+					}
+					if (kwCount == 0) continue
+					keywordInclusionCt ++
+					// Article score is exponential
+					// The handy left bit shift operator can do powers of two!
+					articleScore += kwCount * (1 shl kw.length)
+				}
+
+				articleScore *= Math.pow(keywordInclusionCt.toDouble() /
+					totalKeywordCt.toDouble(), 2.toDouble()) / Math.sqrt(fullText.length.toDouble())
+
+				// If it has a score better than the worst top article, add it in the array and recompute
+				if (articleScore > topArticles[articleCount - 1].first) {
+					topArticles.add(Pair(articleScore, file.getName()))
+					topArticles.sortBy { -it.first } // The sort is descending by default
+					topArticles.removeLast()
+				}
+			}
+		}
+	}
+	return topArticles
 }
 
 suspend fun main(args: Array<String>) = coroutineScope {

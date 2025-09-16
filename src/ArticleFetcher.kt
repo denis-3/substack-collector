@@ -91,8 +91,9 @@ private fun http2Request(url: String): HttpRequestSummary {
 suspend fun customHttp2Request(url: String, retry: Boolean = true): HttpRequestSummary {
 	val httpResp = http2Request(url)
 	if (httpResp.statusCode == 429.toShort() && retry) {
-		Logger.addLog("Got a 429 status code! Retrying in 10s with new cookies...")
-		delay(10000)
+		Logger.addLog("Got a 429 status code! Retrying in 15s with new cookies...")
+		delay(15000)
+		print("After delay")
 		// New cookies
 		val cookieManager = CookieManager()
 		CookieHandler.setDefault(cookieManager)

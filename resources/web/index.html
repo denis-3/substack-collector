@@ -7,7 +7,7 @@
 <style>
 body {
 	font-family: "Arial";
-	background: #eee;
+	background: rgb(250, 250, 250);
 	display: flex;
 	flex-direction: column;
 	justify-content: center;
@@ -47,72 +47,95 @@ div#log {
 	right: 10px;
 	height: calc(100vh - 20px);
 	width: 250px;
-	background: #bbb;
-	border-radius: 18px;
-	overflow: hidden scroll;
+	background: #eee;
+	border-radius: 0 18px 18px 18px;
 	padding: 15px;
 	box-sizing: border-box;
 	font-family: "Monospace";
 	font-size: 12px;
+	border: 1px solid grey;
+	box-shadow: 0 0 8px 1px rgb(220, 220, 220);
+	transform: translateX(0px);
+	transition: transform 0.3s ease;
 }
 
-div#log p:first-child {
+div#log.hidden {
+	transform: translateX(100%);
+}
+
+/* first p is the "System logs" header */
+div#log > div#log-display > p:first-child {
 	text-align: center;
 	font-weight: bold;
 	font-size: 20px;
 	margin-top: 0;
 }
 
+/* error messages */
 div#log > p.err {
 	color: red
 }
 
-/* control messages */
-div#log > p.ctl {
-	color: blue
+div#log > div#toggle-tab {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 20px;
+	height: 20px;
+	background: grey;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	border-radius: 5px 0 0 5px;
+	transform: translate(-100%, -1px);
 }
 
-#categories-container {
+div#log > div#log-display {
+	height: 100%;
+	overflow: hidden scroll;
+}
+
+div#log > div#toggle-tab > span {
+	color: white;
+	font-weight: bold;
+	overflow: visible;
+}
+
+p#system-status {
+	margin-top: 30px;
+}
+
+div#settings-img {
 	position: fixed;
-	top: 10px;
-	left: 10px;
-
-}
-
-#categories-container > p {
-	width: 200px;
-}
-
-textarea {
-	width: 200px;
-	height: 200px;
-	resize: vertical;
+	top: 20px;
+	left: 20px;
+	height: 40px;
+	width: 40px;
+	background: url(/settings.svg);
+	background-size: contain;
+	background-repeat: no-repeat;
+	background-position: center center;
+	cursor: pointer;
 }
 
 </style>
 </head>
 	<body>
-		<div id="categories-container">
-			<p>Enter category numbers here, one on each line with an optional comment after</p>
-			<textarea placeholder="1 Example category with ID of one">Loading...</textarea>
-		</div>
+		<a href="/config"><div id="settings-img" title="Go to configuration page"></div></a>
 		<div id="btn">
 			<button onclick="startScraping()">Update</button>
 		</div>
-<!-- 		<p>Status: idle</p> -->
-		<div id="log">
-			<p>System log</p>
+		<p id="system-status">Status: <span id="system-status-span">Idle</span></p>
+		<div id="log" class="hidden">
+			<div id="toggle-tab" onclick="toggleLogDisplay()"><span>&lt;</span></div>
+			<div id="log-display">
+				<p>System log</p>
+			</div>
 		</div>
 	</body>
 <script>
-const sysLogBox = document.getElementById("log")
-
-async function main() {
-	const req = await fetch("/categories")
-	const text = await req.text()
-	document.getElementsByTagName("textarea")[0].value = text
-	streamLogs()
-}
+const sysLogBox = document.getElementById("log-display")
 
 function millis(m) {
 	return new Promise((resolve) => {
@@ -122,38 +145,43 @@ function millis(m) {
 	})
 }
 
-async function streamLogs() {
+async function streamSystemInfo() {
 	var logsDone = false
+	var firstLoop = true
 	while (!logsDone) {
 		req = await fetch("/logs")
 		// Logs for the run are done once non-success is reached
 		if (req.status >= 300) {
 			logsDone = true
+			if (!firstLoop) {
+				document.getElementById("system-status-span").innerHTML = "Done scraping"
+			}
 		} else {
 			const log = await req.text()
-			sysLogBox.innerHTML = "<p>System log</p><p>" + log.split("\n").join("</p><p>") + "</p>"
+			const [sysStatus, ...logs] = log.split("\n")
+			document.getElementById("system-status-span").innerHTML = sysStatus
+			sysLogBox.innerHTML = "<p>System log</p><p>" + logs.join("</p><p>") + "</p>"
 		}
 		await millis(5000)
+		if (firstLoop) firstLoop = false
 	}
 }
 
 async function startScraping() {
-	var req = await fetch("/categories", { method: "PUT", body: document.getElementsByTagName("textarea")[0].value })
-	var text = await req.text()
+	const req = await fetch("/start-scraping", { method: "POST" })
 	if (req.status >= 300) {
-		return alert(`Error sending categories! HTTP Code ${req.status}. Possibly helpful error text: ${text}`)
-	}
-
-	req = await fetch("/start-scraping", { method: "POST" })
-	text = await req.text()
-	if (req.status >= 300) {
-		return alert(`Error starting scraping! HTTP Code ${req.status}. ${text}`)
+		const text = await req.text()
+		return alert(`Error starting scraping! HTTP code ${req.status}. ${text}`)
 	}
 	sysLogBox.innerHTML = "<p>System log</p>"
 	// Periodically fetch data
-	streamLogs()
+	streamSystemInfo()
 }
 
-main()
+function toggleLogDisplay() {
+	document.getElementById("log").classList.toggle("hidden")
+}
+
+streamSystemInfo()
 </script>
 </html>
