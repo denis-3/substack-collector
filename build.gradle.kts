@@ -4,11 +4,6 @@ plugins {
 	java
 }
 
-java {
-	toolchain {
-		languageVersion = JavaLanguageVersion.of(24)
-	}
-}
 
 kotlin {
 	compilerOptions {
@@ -16,6 +11,7 @@ kotlin {
 		extraWarnings = true
 		freeCompilerArgs = listOf("-Xuse-fir-lt=false")
 	}
+	jvmToolchain(24)
 }
 
 repositories {

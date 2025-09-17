@@ -22,7 +22,7 @@ import org.json.JSONArray
 
 // Directory where output files will be stored (like downloaded articles)
 // No need for a trailing slash here
-private val BASE_OUTPUT_PATH = "./data"
+val BASE_OUTPUT_PATH = "./data"
 
 private val DATE_RE = Regex("(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (0?[1-9]|[12][0-9]|3[01]), \\d{4}")
 private val DATE_RE_2 = Regex("(0[1-9]|1[0-2])\\.(0[1-9]|[12][0-9]|3[01])\\.(\\d{2}|\\d{4})")
@@ -37,6 +37,9 @@ To make this work with Gradle, use its --args switch: gradle run --args "categor
 
 // Convenience extension function
 private fun File.writeStr(str: String) = this.bufferedWriter().use { out -> out.write(str) }
+
+// Used as the return result for getTopArticlesByKeyword()
+data class ArticleSearchResult(val score: Double, val title: String, val author: String, val fileName: String)
 
 // "Article ID" is the numeric or text identifier used by Substack
 // Split the URL based on these possible strings: /p/ /p-  /cp/  /cp-
@@ -170,38 +173,57 @@ suspend fun scrapeArticle(articleLink: String): String {
 		throw Exception("Article date is null!")
 	}
 
+	val articleApiData: JSONObject
+	// Get the real HTML content of the article
+	// Need a special API call for some posts
+	if (articleLink.startsWith("https://substack.com/home/post/p-")) {
+		// "https://substack.com/home/post/p-".length == 33
+		val apiResult = customHttp2Request("https://substack.com/api/v1/posts/by-id/" + articleLink.slice(33..articleLink.length))
+		articleApiData = JSONObject(apiResult.text)
+	} else {
+		val specialScript = articleDoc.select("script").find { it.html().startsWith("window._preloads") }?.html()
+		if (specialScript == null) throw Exception("Could not find article API data embedded in page")
+		articleApiData = JSONObject(specialScript.slice(38..(specialScript.length-2)).replace("\\\"", "\"").replace("\\\\","\\"))
+	}
+	val actualArticleText = articleApiData.getJSONObject("post").getString("body_html")
+	if (actualArticleText == null) throw Exception("No post.body_html field in Substack article API data")
+	tmpArticleFile.writeStr(articleApiData.toString())
+
+	// Array of objects describing the authors
+	val articlePublishedBy = articleApiData.getJSONObject("post").getJSONArray("publishedBylines")
+	val authorList = mutableListOf<String>()
+	for (i in 0..<articlePublishedBy.length()) {
+		authorList.add(articlePublishedBy.getJSONObject(i).getString("name"))
+	}
+	val authorStr = when (authorList.size) {
+		0 -> {
+			// Publication info can be either in "pub" or "publication"
+			if (articleApiData.has("pub")) {
+				articleApiData.getJSONObject("pub").getString("name")
+			} else {
+				articleApiData.getJSONObject("publication").getString("name")
+			}
+		}
+		1 -> {
+			"Original author: ${authorList[0]}"
+		}
+		2 -> {
+			"Original authors: ${authorList[0]} and ${authorList[1]}"
+		}
+		else -> {
+			"Original authors: ${authorList.slice(0..<(authorList.size-1)).joinToString(", ")}, and ${authorList.last()}"
+		}
+	}
+
 	val localDateTime = LocalDateTime.now()
 	val zonedDateTime = ZonedDateTime.of(localDateTime, ZoneId.systemDefault())
 	val nowDateString = zonedDateTime.format(DateTimeFormatter.ofPattern("eee, MMM dd, YYYY, HH:mm:ss z"))
 	// This is the main string
-	var parsedArticle = "Original URL: $articleLink\nScrape time: ${nowDateString}\n\n# $articleTitle"
+	var parsedArticle = "Original URL: $articleLink\n$authorStr\nScrape time: ${nowDateString}\n\n# $articleTitle"
 	if (articleSubtitle != null) {
 		parsedArticle += "\n## $articleSubtitle"
 	}
 	parsedArticle += "\n### $articleDate"
-
-	var actualArticleText: String = ""
-	// Get the real HTML content of the article
-	// Need a special API for some posts
-	if (articleLink.startsWith("https://substack.com/home/post/p-")) {
-		// "https://substack.com/home/post/p-".length == 33
-		val apiResult = customHttp2Request("https://substack.com/api/v1/posts/by-id/" + articleLink.slice(33..articleLink.length))
-		val actualArticleTextNull = JSONObject(apiResult.text).getJSONObject("post").getString("body_html")
-		if (actualArticleTextNull == null) throw Exception("No post.body_html field in Substack post API response!")
-		actualArticleText = actualArticleTextNull
-	} else {
-		for (script in articleDoc.select("script")) {
-			// Look for the special script that has the post HTML body
-			val tc = script.html() // text content
-			if (tc.startsWith("window._preloads") == true) {
-				val actualArticleTextNull = JSONObject(tc.slice(38..(tc.length-2)).replace("\\\"", "\"").replace("\\\\","\\"))
-					.getJSONObject("post").getString("body_html")
-				if (actualArticleTextNull == null) throw Exception("No post.body_html field in embedded Substack JSON data!")
-				actualArticleText = actualArticleTextNull
-				break
-			}
-		}
-	}
 
 	// Save real article HTML for debugging (it's overwritten on subsequent calls of scrapeArticle())
 	tmpArticleFile.writeStr(actualArticleText)
@@ -345,18 +367,19 @@ suspend fun downloadSelectedCategories(maxLimitPerAuthor: Int = 50) {
 }
 
 // Get most relevant articles by a query of keywords
-// It returns the list of articles (which is a pair of article score and file name),
-suspend fun getTopArticlesByKeyword(keywords: List<String>, articleCount: Int = 5): List<Pair<Double, String>> {
+// It returns a pair of search results, total articles searched
+suspend fun getTopArticlesByKeyword(keywords: List<String>, articleCount: Int = 5): Pair<List<ArticleSearchResult>, Int> {
 	val lowerKeywords = keywords.map { it.lowercase() }
 	val totalKeywordCt = keywords.size
 	// Pair of score, article UID hash
-	val topArticles = MutableList<Pair<Double, String>>(articleCount) { Pair(0.0, "") }
-	// Cursed char range...
+	val topArticles = MutableList<ArticleSearchResult>(articleCount) { ArticleSearchResult(0.0, "", "", "") }
+	var totalArticles = 0
 	for (combo in 0..255) {
 		val hex = combo.toHexString(HexFormat {number { minLength = 2; removeLeadingZeros = true } } )
 		val files = File("$BASE_OUTPUT_PATH/${hex[0]}/${hex[1]}").listFiles()
 		if (files != null) {
 			for (file in files) {
+				totalArticles ++
 				val fullText = file.bufferedReader().use { it.readText() }
 				// How many keywords are present in the article
 				var keywordInclusionCt = 0
@@ -379,15 +402,21 @@ suspend fun getTopArticlesByKeyword(keywords: List<String>, articleCount: Int = 
 					totalKeywordCt.toDouble(), 2.toDouble()) / Math.sqrt(fullText.length.toDouble())
 
 				// If it has a score better than the worst top article, add it in the array and recompute
-				if (articleScore > topArticles[articleCount - 1].first) {
-					topArticles.add(Pair(articleScore, file.getName()))
-					topArticles.sortBy { -it.first } // The sort is descending by default
+				if (articleScore > topArticles[articleCount - 1].score) {
+					// Author is on the second line after "Original author: ..."
+					val newlineIdx = fullText.indexOf("\n")
+					val author = fullText.slice((fullText.indexOf(":", newlineIdx)+2)..<fullText.indexOf("\n", newlineIdx+1))
+					// Title is always on the fifth line of the file, after the first # character
+					val hashtagIdx = fullText.indexOf("#")
+					val title = fullText.slice((hashtagIdx+2)..<(fullText.indexOf("\n", hashtagIdx)))
+					topArticles.add(ArticleSearchResult(articleScore, title, author, file.getName()))
+					topArticles.sortBy { -it.score } // The sort is descending by default
 					topArticles.removeLast()
 				}
 			}
 		}
 	}
-	return topArticles
+	return Pair(topArticles, totalArticles)
 }
 
 suspend fun main(args: Array<String>) = coroutineScope {

@@ -15,6 +15,19 @@ body {
 	box-sizing: border-box;
 }
 
+table {
+	background: white;
+}
+
+table, th, td {
+	border: 1px solid black;
+	border-collapse: collapse;
+}
+
+td, th {
+	padding: 8px;
+}
+
 textarea#categories-input {
 	width: 240px;
 	height: 200px;
@@ -22,7 +35,7 @@ textarea#categories-input {
 	border: 1px solid grey;
 	border-radius: 10px;
 	padding: 14px;
-	box-shadow: 0 0 8px 1px rgb(230, 230, 230);
+	box-shadow: 0 0 8px 1px rgb(237, 237, 237);
 	margin: 15px 0 15px;;
 	box-sizing: border-box;
 }
@@ -32,7 +45,7 @@ textarea#categories-input + button {
 	background: white;
 	border-radius: 10px;
 	border: 1px solid grey;
-	box-shadow: 0 0 8px 1px rgb(230, 230, 230);
+	box-shadow: 0 0 8px 1px rgb(237, 237, 237);
 	transition: background 0.2s ease;
 	padding: 10px 14px;
 	display: block;
@@ -41,6 +54,39 @@ textarea#categories-input + button {
 
 textarea#categories-input + button:hover {
 	background: rgb(244, 244, 244);
+}
+
+#search-wrapper {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: center;
+	width: fit-content;
+	margin-bottom: 40px;
+}
+
+input#search-input {
+	padding: 10px 14px;
+	width: 300px;
+	box-sizing: border-box;
+	border: 1px solid grey;
+	border-radius: 10px;
+	outline: none;
+	box-shadow: 0 0 8px 1px rgb(237, 237, 237);
+}
+
+div#search-btn {
+	background: url(/assets/search.svg);
+	background-size: cover;
+	background-position: center;
+	height: 34px;
+	width: 34px;
+	cursor: pointer;
+	margin-left: 14px;
+}
+
+.hidden {
+	display: none
 }
 </style>
 </head>
@@ -51,9 +97,25 @@ textarea#categories-input + button:hover {
 		<textarea id="categories-input" placeholder="1 Example category with ID of one">Loading...</textarea>
 		<button onclick="updateCategories()">Update Categories</button>
 		<h2>Article Search</h2>
-		<p>Enter a term to search for articles. Keywords will match in the article title, subtitle, and body.</p>
+		<p>Enter a comma-separated list of keywords to search for articles. Keywords will match in the article title, subtitle, and body.</p>
+		<div id="search-wrapper">
+			<input type="text" placeholder="coding,technology,gpu" id="search-input" />
+			<div title="Search articles by keyword" id="search-btn" onclick="doSearch()"></div>
+		</div>
+
+		<div id="search-results-container" class="hidden">
+			<p id="search-results-header-text"></p>
+			<table id="search-results-table">
+			</table>
+		</div>
 	</body>
 <script>
+const TABLE_HEADER_HTML = `<tr>
+	<th>Search score</th>
+	<th>Article Title</th>
+	<th>Author</th>
+	<th>Download file</th>
+</tr>`
 const categoriesInput = document.getElementById("categories-input")
 async function fetchCategories() {
 	const req = await fetch("/categories")
@@ -79,6 +141,33 @@ async function updateCategories() {
 		const text = await req.text()
 		alert(`Failed to set new categories. HTTP code ${req.status}. ${text}`)
 	}
+}
+
+async function doSearch() {
+	const keywords = document.getElementById("search-input").value.trim()
+	if (keywords == "") return alert("Please input a list of comma-separated keywords")
+	const req = await fetch("/keyword-search?kws=" + keywords)
+	const text = await req.text()
+	if (req.status >= 300) return alert(`Keyword search failed. HTTP code ${req.status}. ${text}`)
+	// First line is an info message like "Searched X articles in Y ms"
+	const [infoMsg, ...resultLines] = text.trim().split("\n")
+	document.getElementById("search-results-header-text").textContent = infoMsg
+	var innerhtml = TABLE_HEADER_HTML +
+		resultLines.map(l => {
+			const parts = l.split("\0")
+			// Trim the score to three decimals
+			parts[0] = String(Math.round(Number(parts[0]) * 1000) / 1000).padEnd(5, "0")
+			// Truncate the file name and make it a URL
+			parts[3] = `<a href="/download/${parts[3]}" target="_blank">` +
+				parts[3].slice(0, 15) + "..." +
+				parts[3].slice(parts[3].length-15) + "</a>"
+			return "<tr><td>" + parts.join("</td><td>") + "</td></tr>"
+		}).join("")
+	console.log("ihtml is")
+	console.log(innerhtml)
+	document.getElementById("search-results-table")
+		.innerHTML = innerhtml
+	document.getElementById("search-results-container").classList = ""
 }
 
 fetchCategories()
