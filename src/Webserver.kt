@@ -1,5 +1,5 @@
 import articlefetcher.Logger
-import substacklogic.downloadSelectedCategories
+import substacklogic.updateAuthorsAndDownload
 import substacklogic.getTopArticlesByKeyword
 import substacklogic.ArticleSearchResult
 import substacklogic.BASE_OUTPUT_PATH
@@ -183,8 +183,9 @@ class HomePageHandler() : HttpHandler {
 					SCRAPING_NOW = true
 					exchange.sendStringAndClose(204, mapOf(), "")
 					// Main scraping routine
-					downloadSelectedCategories()
+					updateAuthorsAndDownload()
 					SCRAPING_NOW = false
+					return
 				}
 			}
 		}

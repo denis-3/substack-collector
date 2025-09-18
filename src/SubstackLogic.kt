@@ -3,6 +3,7 @@ package substacklogic
 import articlefetcher.customHttp2Request
 import articlefetcher.Logger
 import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.time.LocalDateTime
 import java.time.ZonedDateTime
@@ -31,7 +32,7 @@ private val HELP_TEXT = """Command line options:
   article [articleUrl]                  Get a particular article by its link. Example: article https://read.technically.dev/p/whats-javascript
   authorSubdomain [author's subdomain]  Get articles from an author's subdomain. For example, "authorSubdomain marketsentiment" will get articles from marketsentiment.substack.com
   category [category ID]                Get articles from the top 100 rising authors in a category based on its ID. To get articles from the technology category (which has an ID of 4), use "category 4"
-  all                                   Get all categories as defined in a categories.txt file
+  all                                   Get all categories as defined in a categories.txt file, and authors in subdomain-list.txt
 
 To make this work with Gradle, use its --args switch: gradle run --args "category 62" will invoke this class to get articles from category ID 62 (Business)"""
 
@@ -315,7 +316,9 @@ suspend fun downloadArticlesFromAuthor(authorSubdomain: String, maxLimit: Int, s
 	}
 }
 
+// This returns rising subdomains and saves them to resources/subdomain-list.txt
 suspend fun getRisingSubdomains(categoryId: Int): Set<String> {
+	// Get authors first
 	Logger.addLog("Getting rising authors for category $categoryId...")
 	val authors = mutableSetOf<String>()
 	var page = 0;
@@ -334,6 +337,30 @@ suspend fun getRisingSubdomains(categoryId: Int): Set<String> {
 		page ++
 		more = apiJson.getBoolean("more")
 	}
+
+	// Save them to a persistent text file
+	val mutAuthors = authors.toMutableList()
+	val subdomainFile = File("resources/subdomain-list.txt")
+	subdomainFile.createNewFile() // does nothing if it already exists
+	val subdomainReader = subdomainFile.bufferedReader()
+	while (subdomainReader.ready() && !mutAuthors.isEmpty()) {
+		val line = subdomainReader.readLine()
+		val deleteAuthorIdxs = mutableListOf<Int>()
+		for (i in mutAuthors.indices.reversed()) {
+			if (line == mutAuthors[i]) {
+				deleteAuthorIdxs.add(i)
+			}
+		}
+		for (i in deleteAuthorIdxs) {
+			mutAuthors.removeAt(i)
+		}
+	}
+
+	subdomainReader.close()
+	if (!mutAuthors.isEmpty()) {
+		FileOutputStream(subdomainFile, true).bufferedWriter().use { it.write(authors.joinToString("\n") + "\n") }
+	}
+
 	return authors
 }
 
@@ -359,10 +386,18 @@ private fun parseCategoriesTextSpec(inp: String): Set<Int> {
 	return categories
 }
 
-suspend fun downloadSelectedCategories(maxLimitPerAuthor: Int = 50) {
+// Update rising authors from categories in categories.txt
+// And download their articles
+suspend fun updateAuthorsAndDownload(maxLimitPerAuthor: Int = 50) {
 	val categories = parseCategoriesTextSpec(File("resources/categories.txt").bufferedReader().use { it.readText() })
 	for (category in categories) {
-		downloadArticlesByCategory(category, maxLimitPerAuthor)
+		getRisingSubdomains(category)
+	}
+
+	val subdomainReader = File("resources/subdomain-list.txt").bufferedReader()
+	while (subdomainReader.ready()) {
+		val author = subdomainReader.readLine()
+		downloadArticlesFromAuthor(author, maxLimitPerAuthor, true)
 	}
 }
 
@@ -422,7 +457,7 @@ suspend fun getTopArticlesByKeyword(keywords: List<String>, articleCount: Int = 
 suspend fun main(args: Array<String>) = coroutineScope {
 	Logger.preserveLogsInMemory = false
 	if (args.size == 1 && args[0] == "all") {
-		launch { downloadSelectedCategories(50) }.join()
+		launch { updateAuthorsAndDownload(50) }.join()
 	} else if (args.size == 0 || args.size > 2) {
 		println(HELP_TEXT)
 	} else {

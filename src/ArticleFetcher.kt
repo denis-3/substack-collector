@@ -13,7 +13,7 @@ import kotlin.jvm.optionals.getOrNull
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 
-data class HttpRequestSummary(val statusCode: Short, val headers: Map<String, List<String>>, val text: String) {}
+data class HttpRequestSummary(val statusCode: Int, val headers: Map<String, List<String>>, val text: String) {}
 
 // A global logger class that can collect messages from the various scraping functions in memory
 // Useful for the webserver to display output to the user
@@ -71,7 +71,7 @@ private fun http2Request(url: String): HttpRequestSummary {
 	if (compression == "gzip") {
 		val gUnzipInput = GZIPInputStream(resp.body())
 		return HttpRequestSummary(
-			resp.statusCode().toShort(),
+			resp.statusCode(),
 			respHeaders.map(),
 			gUnzipInput.bufferedReader().use { it.readText() }
 		)
@@ -80,7 +80,7 @@ private fun http2Request(url: String): HttpRequestSummary {
 	}
 
 	return HttpRequestSummary(
-		resp.statusCode().toShort(),
+		resp.statusCode(),
 		respHeaders.map(),
 		resp.body().bufferedReader().use { it.readText() }
 	)
@@ -88,20 +88,24 @@ private fun http2Request(url: String): HttpRequestSummary {
 
 // Custom HTTP2 request with cookies and re-try support
 // This will block so it must be called in, e.g., coroutineScope {}
-suspend fun customHttp2Request(url: String, retry: Boolean = true): HttpRequestSummary {
-	val httpResp = http2Request(url)
-	if (httpResp.statusCode == 429.toShort() && retry) {
-		Logger.addLog("Got a 429 status code! Retrying in 15s with new cookies...")
-		delay(15000)
-		// New cookies
-		val cookieManager = CookieManager()
-		CookieHandler.setDefault(cookieManager)
-		cookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ALL)
-		return customHttp2Request(url, false)
-	} else if (httpResp.statusCode != 200.toShort() && httpResp.statusCode != 403.toShort()) { // Some private substacks return 403
-		Logger.addLog("Start HTTP response from failing request")
-		Logger.addLog(httpResp.text)
-		throw Exception("Unrecognized status code [$url]: ${httpResp.statusCode}")
+suspend fun customHttp2Request(url: String, retryCount: Int = 2): HttpRequestSummary {
+	if (retryCount < 0) throw Exception("Negative retry count")
+	for (i in retryCount downTo 0) {
+		val httpResp = http2Request(url)
+		if (httpResp.statusCode == 429 && i > 0) {
+			Logger.addLog("Got a 429 status code! Retry ${retryCount - i + 1} starting in 15s with new cookies...")
+			delay(15000)
+			// New cookies
+			val cookieManager = CookieManager()
+			CookieHandler.setDefault(cookieManager)
+			cookieManager.setCookiePolicy(CookiePolicy.ACCEPT_ALL)
+			continue
+		} else if (httpResp.statusCode != 200 && httpResp.statusCode != 403) { // Some private substacks return 403
+			Logger.addLog("Start HTTP response from failing request")
+			Logger.addLog(httpResp.text)
+			throw Exception("Unrecognized status code [$url]: ${httpResp.statusCode}")
+		}
+		return httpResp
 	}
-	return httpResp
+	throw Exception() // Not supposed to get here
 }

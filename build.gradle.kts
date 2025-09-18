@@ -35,6 +35,27 @@ application {
 	applicationDefaultJvmArgs = listOf("-Dkotlinx.coroutines.debug")
 }
 
+tasks.register<Tar>("packTar") {
+	// Generate the build artifacts first
+	dependsOn("installDist")
+
+	// Pack resources and build to a single tar
+	archiveFileName = "s-collector.tar"
+	destinationDirectory = layout.buildDirectory.dir("distributions")
+
+	from(layout.buildDirectory.dir("resources/main")) {
+		into("s-collector/resources")
+	}
+	from(layout.buildDirectory.dir("install/substack-collector")) {
+		into("s-collector")
+		eachFile {
+			if (name == "s-collector") {
+				permissions { user { execute = true } }
+			}
+		}
+	}
+}
+
 tasks.register("runScrape") {
 	// Change the entrypoint of the application if the CLI scraping functionality is requested
 	application.mainClass = "substacklogic.SubstackLogicKt"
