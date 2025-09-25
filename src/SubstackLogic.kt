@@ -18,6 +18,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.Attribute
 import org.json.JSONObject
 import org.json.JSONArray
 
@@ -35,6 +36,15 @@ private val HELP_TEXT = """Command line options:
   all                                   Get all categories as defined in a categories.txt file, and authors in subdomain-list.txt
 
 To make this work with Gradle, use its --args switch: gradle run --args "category 62" will invoke this class to get articles from category ID 62 (Business)"""
+
+// Unsupported tags in the outer processing loop
+class UnsupportedElementException(val elementTagName: String) : Exception("Unsupported top-level tag name: $elementTagName")
+// Unsupported tags in parseInnerHtmlToMd()
+class UnsupportedInnerElementException(val elementTagName: String) : Exception("Unsupported child tag name: $elementTagName")
+// Unsupported div class name in outer loop
+class UnsupportedDivClassName(val divClassName: String) : Exception("Unsupported div class name: $divClassName")
+// Unsupported div class name in parseInnerHtmlToMd()
+class UnsupportedInnerDivClassName(val divClassName: String) : Exception("Unsupported child div class name: $divClassName")
 
 // Convenience extension function
 private fun File.writeStr(str: String) = this.bufferedWriter().use { out -> out.write(str) }
@@ -60,6 +70,55 @@ private fun sha256(inp: String): String {
 	return msgDig.digest().joinToString("") {"%02x".format(it)}
 }
 
+// Parse a div with a class name
+// divs can take on different class names for different purposes
+private fun parseDivVariety(elm: Element): String? {
+	if (elm.tagName() != "div") throw IllegalArgumentException("Element is not a div")
+	when (elm.className()) {
+		"captioned-image-container" -> {
+			val imgElm = elm.selectFirst("img")
+			// Not sure how to handle this
+			if (imgElm == null) throw Exception("No img element in a div.captioned-image-container")
+			val imgElmSrc = imgElm.attribute("src")
+			if (imgElmSrc == null) throw Exception("img in div.captioned-image-container has no src attribute")
+			return "[Image](${imgElmSrc.value})"
+		}
+		"youtube-wrap" -> {
+			// These divs have an ID in the form of youtube2-vidoeIdHere
+			val ytVideoId = elm.id().split("-")[1]
+			return "[YouTube Video Embed](https://youtu.be/${ytVideoId})"
+		}
+		"footnote" -> {
+			// First child is an <a> of the footnote number
+			// Second child is the footnote content
+			val children = elm.children()
+			if (children.size != 2) throw Exception("Footnote definition does not have two children")
+			if (children[0].tagName() != "a") throw Exception("Footnote first child is not an a")
+			return "[^${children[0].text()}]: ${parseInnerHtmlToMd(children[1]).trim()}"
+		}
+		"native-video-embed" -> {
+			// Can't parse these because their outer HTML looks like:
+			// <div class="native-video-embed" data-component-name="VideoPlaceholder" data-attrs="{&quot;mediaUploadId&quot;:&quot;f045684f-cc9d-41f9-b56c-dc10eb284358&quot;,&quot;duration&quot;:null}"></div>
+			return "[Video Embed]"
+		}
+		"image-gallery-embed" -> {
+			// This is not error-handled on purpose so as to catch non-conformant cases
+			val imageGalleryJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quote;", "\""))
+			val imageGalleryImages = imageGalleryJson.getJSONObject("gallery").getJSONArray("images")
+			var markdown = ""
+			for (i in 0..<imageGalleryImages.length()) {
+				markdown += "[Image ${i+1}](${imageGalleryImages.getJSONObject(i).getString("src")})\n"
+			}
+			markdown += imageGalleryJson.getJSONObject("gallery").getString("caption")
+			return markdown
+		}
+		// Some ignored div class names
+		"tweet", "instagram", "poll-embed", "embedded-publication-wrap",
+		"subscription-widget-wrap-editor"-> return ""
+		else -> return null
+	}
+}
+
 // Parse the inner HTML of an element to markdown
 private fun parseInnerHtmlToMd(elm: Element): String {
 	// .children() returns HTML element children only
@@ -83,7 +142,11 @@ private fun parseInnerHtmlToMd(elm: Element): String {
 				res[i] = "\n"
 			}
 			"span" -> {
-				res[i] = child.text()
+				if (child.className() == "footnote-hovercard-target") {
+					res[i] = "[^${child.text()}]"
+				} else {
+					res[i] = child.text()
+				}
 			}
 			"strong", "h1", "h2", "h3", "h4", "h5", "h6" -> {
 				val parsedBoldText = parseInnerHtmlToMd(child)
@@ -124,8 +187,18 @@ private fun parseInnerHtmlToMd(elm: Element): String {
 			"a" -> {
 				res[i] = "[${parseInnerHtmlToMd(child)}](${child.attr("href")})"
 			}
+			"hr" -> {
+				res[i] = "---"
+			}
+			"div" -> {
+				val parsedDivMd = parseDivVariety(child)
+				if (parsedDivMd == null) {
+					throw UnsupportedInnerDivClassName(child.className())
+				}
+				res[i] = parsedDivMd
+			}
 			else -> {
-				res[i] += "\nUnsupported child element tag name: ${child.tagName()}"
+				throw UnsupportedInnerElementException(child.tagName())
 			}
 		}
 	}
@@ -256,15 +329,31 @@ suspend fun scrapeArticle(articleLink: String): String {
 			"h1", "h2", "h3", "h4", "h5", "h6" -> {
 				parsedArticle += "\n\n" + "#".repeat(tn[1].digitToInt()) + " " + elm.text()
 			}
-			"div", "blockquote" -> {
-				if (tn == "div" && !elm.hasClass("pullquote")) continue
+			"div" -> {
+				val ecn = elm.className()
+				if (ecn == "") {
+					parsedArticle += "\n\n" + parseInnerHtmlToMd(elm)
+				} else if (ecn == "pullquote") { // div.pullquote needs the parseInnerHtmlToMd() advanced parser
+					parsedArticle += "\n\n> " + parseInnerHtmlToMd(elm).trim().split("\n").joinToString("\n>")
+				} else {
+					val parsedDivMd = parseDivVariety(elm)
+					if (parsedDivMd == null) {
+						throw UnsupportedDivClassName(ecn)
+					}
+					parsedArticle += "\n\n" + parsedDivMd
+				}
+			}
+			"blockquote" -> {
+				// Same as div.pullquote above
 				parsedArticle += "\n\n> " + parseInnerHtmlToMd(elm).trim().split("\n").joinToString("\n>")
 			}
 			"pre", "code" -> {
 				parsedArticle += "\n\n```\n${elm.text()}\n```"
 			}
+			// Ignored elements
+			"iframe" -> {}
 			else -> {
-				parsedArticle += "Unsupported top-level element: ${elm.tagName()}"
+				throw UnsupportedElementException(elm.tagName())
 			}
 		}
 	}
