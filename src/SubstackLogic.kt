@@ -84,7 +84,7 @@ private fun parseDivVariety(elm: Element): String? {
 			return "[Image](${imgElmSrc.value})"
 		}
 		"youtube-wrap" -> {
-			// These divs have an ID in the form of youtube2-vidoeIdHere
+			// These divs have an ID in the form of youtube2-videoIdHere
 			val ytVideoId = elm.id().split("-")[1]
 			return "[YouTube Video Embed](https://youtu.be/${ytVideoId})"
 		}
@@ -102,8 +102,9 @@ private fun parseDivVariety(elm: Element): String? {
 			return "[Video Embed]"
 		}
 		"image-gallery-embed" -> {
+			print("imgae gallery")
 			// This is not error-handled on purpose so as to catch non-conformant cases
-			val imageGalleryJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quote;", "\""))
+			val imageGalleryJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
 			val imageGalleryImages = imageGalleryJson.getJSONObject("gallery").getJSONArray("images")
 			var markdown = ""
 			for (i in 0..<imageGalleryImages.length()) {
@@ -111,6 +112,34 @@ private fun parseDivVariety(elm: Element): String? {
 			}
 			markdown += imageGalleryJson.getJSONObject("gallery").getString("caption")
 			return markdown
+		}
+		"digest-post-embed" -> {
+			print("digest post")
+			// This has a data-attrs with JSON about the post
+			val dataAttrs = elm.attribute("data-attrs")
+			if (dataAttrs == null) throw Exception("data-attrs attribute not found in div.digest-post-embed")
+			val postEmbedJson = JSONObject(dataAttrs.value.replace("&quot;", "\""))
+			val postEmbedTitle = postEmbedJson.getString("title")
+			val bylines = mutableListOf<String>()
+			if (postEmbedJson.getBoolean("showBylines") == true) {
+				val bylinesArr = postEmbedJson.getJSONArray("publishedBylines")
+				for (i in 0..<bylinesArr.length()) {
+					bylines.add(bylinesArr.getJSONObject(i).getString("name"))
+				}
+			}
+			val bylinesString = when (bylines.size) {
+				0 -> ""
+				1 -> "By ${bylines[0]}\n\n"
+				2 -> "By ${bylines[0]} and ${bylines[1]}\n\n"
+				else -> "By" + bylines.slice(0..(bylines.size-2)).joinToString(", ") + ", and ${bylines[bylines.size - 1]}\n\n"
+			}
+			val postEmbedCaption = postEmbedJson.getString("caption")
+			val postEmbedCoverImg = postEmbedJson.getString("cover_image")
+			// The call-to-action (cta) is text like "Read more"
+			val postEmbedCta = postEmbedJson.getString("cta")
+			val postEmbedUrl = postEmbedJson.getString("canonical_url")
+			return "---\n\n### $postEmbedTitle\n\n$bylinesString[Cover Image]($postEmbedCoverImg)\n\n$postEmbedCaption\n\n" +
+				"[$postEmbedCta ->]($postEmbedUrl)\n\n---"
 		}
 		// Some ignored div class names
 		"tweet", "instagram", "poll-embed", "embedded-publication-wrap",
