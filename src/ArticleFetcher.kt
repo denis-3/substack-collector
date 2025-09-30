@@ -8,12 +8,15 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse.BodyHandlers
 import java.net.URI
+import java.net.ConnectException
 import java.util.zip.GZIPInputStream
 import kotlin.jvm.optionals.getOrNull
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 
-data class HttpRequestSummary(val statusCode: Int, val headers: Map<String, List<String>>, val text: String) {}
+data class HttpResponseSummary(val statusCode: Int, val headers: Map<String, List<String>>, val text: String) {}
+
+class MaxRetriesReachedException(url: String): Exception("Reached maximum retry count for URL: $url")
 
 // A global logger class that can collect messages from the various scraping functions in memory
 // Useful for the webserver to display output to the user
@@ -29,7 +32,7 @@ class LoggerClass(var preserveLogsInMemory: Boolean) {
 val Logger = LoggerClass(true)
 
 val HTTP_HEADERS = mapOf(
-	"User-Agent" to "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+	"User-Agent" to "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.10 Safari/605.1.1",
 	"Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 	"Accept-Language" to "en-US,en;q=0.5",
 	"Accept-Encoding" to "gzip",
@@ -44,7 +47,7 @@ val HTTP_HEADERS = mapOf(
 )
 
 // Basic implementation of an HTTP2 request
-private fun http2Request(url: String): HttpRequestSummary {
+private fun http2Request(url: String): HttpResponseSummary {
 	val cookieManager = CookieHandler.getDefault()
 	if (cookieManager == null) {
 		val newCookieManager = CookieManager()
@@ -70,7 +73,7 @@ private fun http2Request(url: String): HttpRequestSummary {
 
 	if (compression == "gzip") {
 		val gUnzipInput = GZIPInputStream(resp.body())
-		return HttpRequestSummary(
+		return HttpResponseSummary(
 			resp.statusCode(),
 			respHeaders.map(),
 			gUnzipInput.bufferedReader().use { it.readText() }
@@ -79,7 +82,7 @@ private fun http2Request(url: String): HttpRequestSummary {
 		throw Exception("Unrecognized compression: $compression")
 	}
 
-	return HttpRequestSummary(
+	return HttpResponseSummary(
 		resp.statusCode(),
 		respHeaders.map(),
 		resp.body().bufferedReader().use { it.readText() }
@@ -88,13 +91,22 @@ private fun http2Request(url: String): HttpRequestSummary {
 
 // Custom HTTP2 request with cookies and re-try support
 // This will block so it must be called in, e.g., coroutineScope {}
-suspend fun customHttp2Request(url: String, retryCount: Int = 2): HttpRequestSummary {
+suspend fun customHttp2Request(url: String, retryCount: Int = 2): HttpResponseSummary {
 	if (retryCount < 0) throw Exception("Negative retry count")
-	for (i in retryCount downTo 0) {
-		val httpResp = http2Request(url)
-		if (httpResp.statusCode == 429 && i > 0) {
-			Logger.addLog("Got a 429 status code! Retry ${retryCount - i + 1} starting in 15s with new cookies...")
-			delay(15000)
+	for (i in 0..retryCount) {
+		val httpResp: HttpResponseSummary;
+		try {
+			httpResp = http2Request(url)
+		} catch (connErr: ConnectException) {
+			if (i < retryCount) {
+				Logger.addLog("Caught a java.net.ConnectionException! Retry ${i+1} starting in 7 seconds...")
+				delay(7000)
+			}
+			continue
+		}
+		if (httpResp.statusCode == 429 && i < retryCount) {
+			Logger.addLog("Got a 429 status code! Retry ${i+1} starting in 14 seconds with new cookies...")
+			delay(14000)
 			// New cookies
 			val cookieManager = CookieManager()
 			CookieHandler.setDefault(cookieManager)
@@ -107,5 +119,5 @@ suspend fun customHttp2Request(url: String, retryCount: Int = 2): HttpRequestSum
 		}
 		return httpResp
 	}
-	throw Exception() // Not supposed to get here
+	throw MaxRetriesReachedException(url)
 }

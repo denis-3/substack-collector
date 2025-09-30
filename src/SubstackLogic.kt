@@ -2,6 +2,7 @@ package substacklogic
 
 import articlefetcher.customHttp2Request
 import articlefetcher.Logger
+import articlefetcher.HttpResponseSummary
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -49,6 +50,11 @@ class UnsupportedInnerDivClassName(val divClassName: String) : Exception("Unsupp
 // Convenience extension function
 private fun File.writeStr(str: String) = this.bufferedWriter().use { out -> out.write(str) }
 
+// Truncates a string to a given length and adds ...
+private fun String.truncateToLength(targetLength: Int): String =
+	if (this.length > targetLength) this.slice(0..<targetLength).trim() + "..."
+	else this
+
 // Used as the return result for getTopArticlesByKeyword()
 data class ArticleSearchResult(val score: Double, val title: String, val author: String, val fileName: String)
 
@@ -77,33 +83,16 @@ private fun parseDivVariety(elm: Element): String? {
 	when (elm.className()) {
 		"captioned-image-container" -> {
 			val imgElm = elm.selectFirst("img")
-			// Not sure how to handle this
 			if (imgElm == null) throw Exception("No img element in a div.captioned-image-container")
 			val imgElmSrc = imgElm.attribute("src")
 			if (imgElmSrc == null) throw Exception("img in div.captioned-image-container has no src attribute")
-			return "[Image](${imgElmSrc.value})"
-		}
-		"youtube-wrap" -> {
-			// These divs have an ID in the form of youtube2-videoIdHere
-			val ytVideoId = elm.id().split("-")[1]
-			return "[YouTube Video Embed](https://youtu.be/${ytVideoId})"
-		}
-		"footnote" -> {
-			// First child is an <a> of the footnote number
-			// Second child is the footnote content
-			val children = elm.children()
-			if (children.size != 2) throw Exception("Footnote definition does not have two children")
-			if (children[0].tagName() != "a") throw Exception("Footnote first child is not an a")
-			return "[^${children[0].text()}]: ${parseInnerHtmlToMd(children[1]).trim()}"
-		}
-		"native-video-embed" -> {
-			// Can't parse these because their outer HTML looks like:
-			// <div class="native-video-embed" data-component-name="VideoPlaceholder" data-attrs="{&quot;mediaUploadId&quot;:&quot;f045684f-cc9d-41f9-b56c-dc10eb284358&quot;,&quot;duration&quot;:null}"></div>
-			return "[Video Embed]"
+			val imgCaptionElm = elm.selectFirst("figcaption")
+			if (imgCaptionElm == null) {
+				return "[Image](${imgElmSrc.value})"
+			}
+			return "[Image](${imgElmSrc.value}): ${parseInnerHtmlToMd(imgCaptionElm).trim()}"
 		}
 		"image-gallery-embed" -> {
-			print("imgae gallery")
-			// This is not error-handled on purpose so as to catch non-conformant cases
 			val imageGalleryJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
 			val imageGalleryImages = imageGalleryJson.getJSONObject("gallery").getJSONArray("images")
 			var markdown = ""
@@ -113,8 +102,36 @@ private fun parseDivVariety(elm: Element): String? {
 			markdown += imageGalleryJson.getJSONObject("gallery").getString("caption")
 			return markdown
 		}
+		"captioned-button-wrap" -> {
+			// A simple button with a "preamble"
+			val captionedButtonJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val buttonPreambleDiv = elm.selectFirst("div.preamble")
+			if (buttonPreambleDiv == null) throw Exception("div.preamble not found in div.captioned-button-wrap")
+			return "> *${parseInnerHtmlToMd(buttonPreambleDiv).trim()}*\n> [${captionedButtonJson.getString("text")}](${
+				captionedButtonJson.getString("url")})"
+		}
+		"pullquote" -> {
+			return "> " + parseInnerHtmlToMd(elm).trim().split("\n").joinToString("\n>")
+		}
+		"footnote" -> {
+			// First child is an <a> of the footnote number
+			// Second child is the footnote content
+			val children = elm.children()
+			if (children.size != 2) throw Exception("Footnote definition does not have two children")
+			if (children[0].tagName() != "a") throw Exception("Footnote first child is not an a")
+			return "[^${children[0].text()}]: ${parseInnerHtmlToMd(children[1]).trim()}"
+		}
+		// Can't parse these because their outer HTML looks like:
+		// <div class="native-video-embed" data-component-name="VideoPlaceholder" data-attrs="{&quot;mediaUploadId&quot;:&quot;f045684f-cc9d-41f9-b56c-dc10eb284358&quot;,&quot;duration&quot;:null}"></div>
+		"native-video-embed" -> {
+			return "[Video Embed]"
+		}
+		// Can't parse this either
+		// Outer HTML: <div class="native-audio-embed" data-component-name="AudioPlaceholder" data-attrs="{&quot;label&quot;:null,&quot;mediaUploadId&quot;:&quot;c910213c-5c5b-4bcc-98c8-d51ad9807872&quot;,&quot;duration&quot;:881.24084,&quot;isEditorNode&quot;:true}"></div>
+		"native-audio-embed" -> {
+			return "[Audio Embed]"
+		}
 		"digest-post-embed" -> {
-			print("digest post")
 			// This has a data-attrs with JSON about the post
 			val dataAttrs = elm.attribute("data-attrs")
 			if (dataAttrs == null) throw Exception("data-attrs attribute not found in div.digest-post-embed")
@@ -136,20 +153,103 @@ private fun parseDivVariety(elm: Element): String? {
 			val postEmbedCaption = postEmbedJson.getString("caption")
 			val postEmbedCoverImg = postEmbedJson.getString("cover_image")
 			// The call-to-action (cta) is text like "Read more"
-			val postEmbedCta = postEmbedJson.getString("cta")
+			val postEmbedCta = if (postEmbedJson.isNull("cta")) "Read full story" else postEmbedJson.getString("cta")
 			val postEmbedUrl = postEmbedJson.getString("canonical_url")
 			return "---\n\n### $postEmbedTitle\n\n$bylinesString[Cover Image]($postEmbedCoverImg)\n\n$postEmbedCaption\n\n" +
 				"[$postEmbedCta ->]($postEmbedUrl)\n\n---"
 		}
+		// Very similar to div.digest-post-embed
+		"embedded-post-wrap" -> {
+			val dataAttrs = elm.attribute("data-attrs")
+			if (dataAttrs == null) throw Exception("data-attrs attribute not found in div.digest-post-embed")
+			val postEmbedJson = JSONObject(dataAttrs.value.replace("&quot;", "\""))
+			val postEmbedTitle = postEmbedJson.getString("title")
+			val postEmbedDesc = postEmbedJson.getString("truncated_body_text")
+			val postEmbedUrl = postEmbedJson.getString("url")
+			val bylines = mutableListOf<String>()
+			val bylinesArr = postEmbedJson.getJSONArray("bylines")
+			for (i in 0..<bylinesArr.length()) {
+				bylines.add(bylinesArr.getJSONObject(i).getString("name"))
+			}
+			val bylinesString = when (bylines.size) {
+				0 -> ""
+				1 -> "By ${bylines[0]}\n\n"
+				2 -> "By ${bylines[0]} and ${bylines[1]}\n\n"
+				else -> "By" + bylines.slice(0..(bylines.size-2)).joinToString(", ") + ", and ${bylines[bylines.size - 1]}\n\n"
+			}
+			return "---\n\n### $postEmbedTitle\n\n$bylinesString$postEmbedDesc\n\n" +
+				"[Read More]($postEmbedUrl)\n\n---"
+		}
+		// This one is used for some interactive graphs
+		"datawrapper-wrap outer" -> {
+			val dataWrapperJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val dataTitle = dataWrapperJson.getString("title")
+			val dataDesc = dataWrapperJson.getString("description")
+			val interactiveUrl = dataWrapperJson.getString("url") // iframe of the datawrapper
+			val thumbnailUrl = dataWrapperJson.getString("thumbnail_url_full") // static thumbnail image
+			return "[$dataTitle: $dataDesc]($interactiveUrl) ([Static version]($thumbnailUrl))"
+		}
+		"youtube-wrap" -> {
+			// These divs have an ID in the form of youtube2-videoIdHere
+			val ytVideoId = elm.id().split("-")[1]
+			return "[YouTube Video Embed](https://youtu.be/${ytVideoId})"
+		}
+		// An embedded Substack comment
+		"comment" -> {
+			val commentJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+				.getJSONObject("comment")
+			val poster = commentJson.getString("name")
+			val commentBody = commentJson.getString("body").replace("\\n", "\n")
+			return "Comment from $poster: $commentBody"
+		}
+		// Best thing to do is just get the iframe's URL
+		"apple-podcast-container" -> {
+			val iframeElm = elm.selectFirst("iframe")
+			if (iframeElm == null) throw Exception("iframe not found in div.apple-podcast-container")
+			val podcastJson = JSONObject(iframeElm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val podcastName = podcastJson.getString("podcastTitle")
+			val podcastAuthor = podcastJson.getString("podcastByline")
+			val podcastUrl = podcastJson.getString("targetUrl")
+			return "[Listen to \"$podcastName\" by $podcastAuthor on Apple Podcasts]($podcastUrl)"
+		}
+		"file-embed-wrapper" -> {
+			val fileName = elm.selectFirst("div.file-embed-details-h1")
+			if (fileName == null) throw Exception("div.file-embed-details-h1 not found in div.file-embed-wrapper")
+			val fileDetails = elm.selectFirst("div.file-embed-details-h2") // "fileDetails" is a string of the file size and type
+			if (fileDetails == null) throw Exception("div.file-embed-details-h2 not found in div.file-embed-wrapper")
+			val fileDownloadBtn = elm.selectFirst("a.file-embed-button-wide")
+			if (fileDownloadBtn == null) throw Exception("div.file-embed-wrapper has no a.file-embed-button-wide")
+			return "[Download ${fileName.text()} (${fileDetails.text()})](${fileDownloadBtn.attribute("stc")!!.value})"
+		}
+		"bluesky-wrap outer" -> {
+			val postJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val postAuthor = postJson.getString("authorName")
+			val postAuthorUsername = postJson.getString("authorHandle")
+			val postText = postJson.getString("text")
+			// Have to get URL from iframe element
+			val postEmbed = elm.selectFirst("iframe")
+			if (postEmbed == null) throw Exception("iframe not found in div.bluesky-wrap.outer")
+			return "[$postAuthor (@$postAuthorUsername) posted on BlueSky: \"$postText\"](${postEmbed.attribute("src")!!.value})"
+		}
+		"soundcloud-wrap" -> {
+			val scTrackJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val trackTitle = scTrackJson.getString("title")
+			val trackAuthor = scTrackJson.getString("author_name")
+			val trackDescr = scTrackJson.getString("description").truncateToLength(60).replace("\\n", "\n")
+			val trackUrl = scTrackJson.getString("targetUrl")
+			return "[Listen to \"$trackTitle\" by $trackAuthor on SoundCloud]($trackUrl): $trackDescr"
+		}
 		// Some ignored div class names
+		// TODO: bring back parsing for socials if possible
 		"tweet", "instagram", "poll-embed", "embedded-publication-wrap",
-		"subscription-widget-wrap-editor"-> return ""
-		else -> return null
+		"subscription-widget-wrap-editor", "community-chat",
+		"directMessage button", "install-substack-app-embed install-substack-app-embed-web" -> return null
+		else -> throw UnsupportedDivClassName(elm.className())
 	}
 }
 
 // Parse the inner HTML of an element to markdown
-private fun parseInnerHtmlToMd(elm: Element): String {
+private fun parseInnerHtmlToMd(elm: Element, onlyInlineElements: Boolean = false): String {
 	// .children() returns HTML element children only
 	val children = elm.children()
 	if (children.size == 0) return elm.text()
@@ -219,16 +319,28 @@ private fun parseInnerHtmlToMd(elm: Element): String {
 			"hr" -> {
 				res[i] = "---"
 			}
+			"sup", "sub" -> {
+				// Not all markdown applications will display this format
+				// Since markdown does not natively support {sub|super}scripts
+				val ctn = child.tagName()
+				res[i] = "<$ctn>${child.text()}</$ctn>"
+			}
 			"div" -> {
-				val parsedDivMd = parseDivVariety(child)
-				if (parsedDivMd == null) {
-					throw UnsupportedInnerDivClassName(child.className())
+				try {
+					if (child.className() == "") {
+						res[i] = parseInnerHtmlToMd(child)
+					} else {
+						val parsedDivMd = parseDivVariety(child)
+						if (parsedDivMd != null) {
+							res[i] = parsedDivMd
+						}
+					}
+				} catch(e: UnsupportedDivClassName) {
+					// Rethrow exception but with the "Inner" version
+					throw UnsupportedInnerDivClassName(e.divClassName)
 				}
-				res[i] = parsedDivMd
 			}
-			else -> {
-				throw UnsupportedInnerElementException(child.tagName())
-			}
+			else -> throw UnsupportedInnerElementException(child.tagName())
 		}
 	}
 	return res.joinToString("")
@@ -359,28 +471,35 @@ suspend fun scrapeArticle(articleLink: String): String {
 				parsedArticle += "\n\n" + "#".repeat(tn[1].digitToInt()) + " " + elm.text()
 			}
 			"div" -> {
-				val ecn = elm.className()
-				if (ecn == "") {
+				if (elm.className() == "") {
 					parsedArticle += "\n\n" + parseInnerHtmlToMd(elm)
-				} else if (ecn == "pullquote") { // div.pullquote needs the parseInnerHtmlToMd() advanced parser
-					parsedArticle += "\n\n> " + parseInnerHtmlToMd(elm).trim().split("\n").joinToString("\n>")
 				} else {
 					val parsedDivMd = parseDivVariety(elm)
-					if (parsedDivMd == null) {
-						throw UnsupportedDivClassName(ecn)
+					if (parsedDivMd != null) {
+						parsedArticle += "\n\n" + parsedDivMd
 					}
-					parsedArticle += "\n\n" + parsedDivMd
 				}
 			}
 			"blockquote" -> {
-				// Same as div.pullquote above
+				// Same as div.pullquote
 				parsedArticle += "\n\n> " + parseInnerHtmlToMd(elm).trim().split("\n").joinToString("\n>")
 			}
 			"pre", "code" -> {
 				parsedArticle += "\n\n```\n${elm.text()}\n```"
 			}
-			// Ignored elements
-			"iframe" -> {}
+			"iframe" -> {
+				// This one is similar to div.apple-podcast-container
+				if (elm.hasClass("spotify-wrap")) {
+					val podcastJson = JSONObject(elm.attribute("data-attrs")!!.value)
+					val podcastFullTitle = podcastJson.getString("title") + ":" +
+						podcastJson.getString("subtitle")
+					val podcastUrl = podcastJson.getString("url")
+					parsedArticle += "\n\n[Listen to \"$podcastFullTitle\" on Spotify]($podcastUrl)"
+				} else {
+					// Error on other iframes (must deliberately ignore them)
+					throw UnsupportedElementException(elm.tagName())
+				}
+			}
 			else -> {
 				throw UnsupportedElementException(elm.tagName())
 			}
@@ -403,10 +522,18 @@ suspend fun getArticlesFromAuthor(authorSubdomain: String, maxLimit: Int): Set<S
 	var offset = 0
 	while (articles.size < maxLimit && offset < 300) { // hard-stop at offset 300
 		delay(750) // Avoid calling the API too quickly
-		val apiResult = customHttp2Request("https://$authorSubdomain.substack.com/api/v1/archive?sort=new&search=&offset=$offset&limit=20")
-		if (apiResult.text.length < 10) break // For a short response, assume we're done
+		val apiResult: HttpResponseSummary;
+		try {
+			apiResult = customHttp2Request("https://$authorSubdomain.substack.com/api/v1/archive?sort=new&search=&offset=$offset&limit=20")
+		} catch (e: Exception) {
+			// Usually this happens when the server aggressively
+			// responds with 429 or cannot establish connection
+			Logger.addLog("Unable to fetch articles for $authorSubdomain: $e")
+			break
+		}
 		val apiArticles = JSONArray(apiResult.text)
 		val apiArticlesLength = apiArticles.length()
+		if (apiArticlesLength == 0) break
 		for (i in 0..<apiArticlesLength) {
 			val thisArticleObj = apiArticles.getJSONObject(i)
 			if (thisArticleObj.getString("audience") == "everyone" && thisArticleObj.getString("type") != "podcast") {

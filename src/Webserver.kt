@@ -201,7 +201,7 @@ class HomePageHandler() : HttpHandler {
 			try {
 				_handle(exchange)
 			} catch (e: Exception) {
-				val errorMsg = "Server error: $e"
+				val errorMsg = "Server error: $e\n${e.stackTraceToString()}"
 				println(errorMsg)
 				Logger.addLog(errorMsg)
 				exchange.sendStringAndClose(500,
