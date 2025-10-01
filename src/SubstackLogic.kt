@@ -92,6 +92,11 @@ private fun parseDivVariety(elm: Element): String? {
 			}
 			return "[Image](${imgElmSrc.value}): ${parseInnerHtmlToMd(imgCaptionElm).trim()}"
 		}
+		// No caption for this one
+		"image3" -> {
+			val img3Json = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			return "[Image](${img3Json.getString("src")})"
+		}
 		"image-gallery-embed" -> {
 			val imageGalleryJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
 			val imageGalleryImages = imageGalleryJson.getJSONObject("gallery").getJSONArray("images")
@@ -164,7 +169,8 @@ private fun parseDivVariety(elm: Element): String? {
 			if (dataAttrs == null) throw Exception("data-attrs attribute not found in div.digest-post-embed")
 			val postEmbedJson = JSONObject(dataAttrs.value.replace("&quot;", "\""))
 			val postEmbedTitle = postEmbedJson.getString("title")
-			val postEmbedDesc = postEmbedJson.getString("truncated_body_text")
+			val postEmbedDesc = if (postEmbedJson.isNull("truncated_body_text")) ""
+				else postEmbedJson.getString("truncated_body_text") + "\n\n"
 			val postEmbedUrl = postEmbedJson.getString("url")
 			val bylines = mutableListOf<String>()
 			val bylinesArr = postEmbedJson.getJSONArray("bylines")
@@ -177,8 +183,14 @@ private fun parseDivVariety(elm: Element): String? {
 				2 -> "By ${bylines[0]} and ${bylines[1]}\n\n"
 				else -> "By" + bylines.slice(0..(bylines.size-2)).joinToString(", ") + ", and ${bylines[bylines.size - 1]}\n\n"
 			}
-			return "---\n\n### $postEmbedTitle\n\n$bylinesString$postEmbedDesc\n\n" +
+			return "---\n\n### $postEmbedTitle\n\n$bylinesString$postEmbedDesc" +
 				"[Read More]($postEmbedUrl)\n\n---"
+		}
+		"meeting-embed" -> {
+			val meetingJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val meetingPerson = meetingJson.getString("name")
+			val meetingLink = meetingJson.getString("url")
+			return "[Book a meeting with $meetingPerson]($meetingLink)"
 		}
 		// This one is used for some interactive graphs
 		"datawrapper-wrap outer" -> {
@@ -217,9 +229,23 @@ private fun parseDivVariety(elm: Element): String? {
 			if (fileName == null) throw Exception("div.file-embed-details-h1 not found in div.file-embed-wrapper")
 			val fileDetails = elm.selectFirst("div.file-embed-details-h2") // "fileDetails" is a string of the file size and type
 			if (fileDetails == null) throw Exception("div.file-embed-details-h2 not found in div.file-embed-wrapper")
-			val fileDownloadBtn = elm.selectFirst("a.file-embed-button-wide")
-			if (fileDownloadBtn == null) throw Exception("div.file-embed-wrapper has no a.file-embed-button-wide")
-			return "[Download ${fileName.text()} (${fileDetails.text()})](${fileDownloadBtn.attribute("stc")!!.value})"
+			val fileDownloadBtn = elm.selectFirst("a.file-embed-button")
+			if (fileDownloadBtn == null) throw Exception("div.file-embed-wrapper has no a.file-embed-button")
+			return "[Download ${fileName.text()} (${fileDetails.text()})](${fileDownloadBtn.attribute("href")!!.value})"
+		}
+		"tweet" -> {
+			val tweetJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val tweetAuthor = tweetJson.getString("name")
+			val tweetAuthorUsername = tweetJson.getString("username")
+			val tweetText = tweetJson.getString("full_text").replace("\\n", "\n")
+			return "[$tweetAuthor (@$tweetAuthorUsername) posted on X: \"$tweetText\"](${tweetJson.getString("url")})"
+		}
+		"instagram" -> {
+			val postJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val postAuthor = postJson.getString("author_name")
+			val postTitle = postJson.getString("title")
+			val postId = postJson.getString("instagram_id")
+			return "[@$postAuthor posted on Instagram: $postTitle](https://instagram.com/p/$postId)"
 		}
 		"bluesky-wrap outer" -> {
 			val postJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
@@ -241,7 +267,7 @@ private fun parseDivVariety(elm: Element): String? {
 		}
 		// Some ignored div class names
 		// TODO: bring back parsing for socials if possible
-		"tweet", "instagram", "poll-embed", "embedded-publication-wrap",
+		"poll-embed", "embedded-publication-wrap", "paywall-jump",
 		"subscription-widget-wrap-editor", "community-chat",
 		"directMessage button", "install-substack-app-embed install-substack-app-embed-web" -> return null
 		else -> throw UnsupportedDivClassName(elm.className())
