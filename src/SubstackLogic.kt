@@ -57,6 +57,8 @@ private fun String.truncateToLength(targetLength: Int): String =
 
 // Used as the return result for getTopArticlesByKeyword()
 data class ArticleSearchResult(val score: Double, val title: String, val author: String, val fileName: String)
+// Return result for getArticlesFromAuthor()
+data class ArticleIdAndUrl(val id: Int, val url: String)
 
 // "Article ID" is the numeric or text identifier used by Substack
 // Split the URL based on these possible strings: /p/ /p-  /cp/  /cp-
@@ -115,6 +117,7 @@ private fun parseDivVariety(elm: Element): String? {
 			return "> *${parseInnerHtmlToMd(buttonPreambleDiv).trim()}*\n> [${captionedButtonJson.getString("text")}](${
 				captionedButtonJson.getString("url")})"
 		}
+		// preformatted-block renders the same as pullquote
 		"pullquote" -> {
 			return "> " + parseInnerHtmlToMd(elm).trim().split("\n").joinToString("\n>")
 		}
@@ -192,6 +195,9 @@ private fun parseDivVariety(elm: Element): String? {
 			val meetingLink = meetingJson.getString("url")
 			return "[Book a meeting with $meetingPerson]($meetingLink)"
 		}
+		"preformatted-block" -> {
+			return parseInnerHtmlToMd(elm).trim()
+		}
 		// This one is used for some interactive graphs
 		"datawrapper-wrap outer" -> {
 			val dataWrapperJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
@@ -200,6 +206,14 @@ private fun parseDivVariety(elm: Element): String? {
 			val interactiveUrl = dataWrapperJson.getString("url") // iframe of the datawrapper
 			val thumbnailUrl = dataWrapperJson.getString("thumbnail_url_full") // static thumbnail image
 			return "[$dataTitle: $dataDesc]($interactiveUrl) ([Static version]($thumbnailUrl))"
+		}
+		// Prediction market embeds ?!
+		"prediction-market-wrap outer" -> {
+			// This JSON only has url and thumbnail_url
+			val predictionJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val predictionUrl = predictionJson.getString("url")
+			val predictionThumbnail = predictionJson.getString("thumbnail_url")
+			return "[Prediction market question]($predictionUrl) ([Static version]($predictionThumbnail))"
 		}
 		"youtube-wrap" -> {
 			// These divs have an ID in the form of youtube2-videoIdHere
@@ -233,6 +247,13 @@ private fun parseDivVariety(elm: Element): String? {
 			if (fileDownloadBtn == null) throw Exception("div.file-embed-wrapper has no a.file-embed-button")
 			return "[Download ${fileName.text()} (${fileDetails.text()})](${fileDownloadBtn.attribute("href")!!.value})"
 		}
+		// A Latex object
+		// Can't do much here, so just display the raw formula as a code block
+		"latex-rendered" -> {
+			val latexJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val rawFormula = latexJson.getString("persistentExpression")
+			return "`$rawFormula`"
+		}
 		"tweet" -> {
 			val tweetJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
 			val tweetAuthor = tweetJson.getString("name")
@@ -243,9 +264,18 @@ private fun parseDivVariety(elm: Element): String? {
 		"instagram" -> {
 			val postJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
 			val postAuthor = postJson.getString("author_name")
-			val postTitle = postJson.getString("title")
+			val postTitle = postJson.getString("title") // "title" is actually the post text
 			val postId = postJson.getString("instagram_id")
 			return "[@$postAuthor posted on Instagram: $postTitle](https://instagram.com/p/$postId)"
+		}
+		"tiktok-wrap outer" -> {
+			val tiktokJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val tiktokAuthor = tiktokJson.getString("author")
+			val tiktokTitle = tiktokJson.getString("title") // "title" is actually the post text
+			val tiktokUrl = tiktokJson.getString("url")
+			val authorHandleA = elm.selectFirst("a.author") // this has the author's @username
+			if (authorHandleA == null) throw Exception("No a.author in div.tiktok-wrap.outer")
+			return "[$tiktokAuthor (${authorHandleA.text()}) posted on TikTok: $tiktokTitle]($tiktokUrl)"
 		}
 		"bluesky-wrap outer" -> {
 			val postJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
@@ -266,7 +296,6 @@ private fun parseDivVariety(elm: Element): String? {
 			return "[Listen to \"$trackTitle\" by $trackAuthor on SoundCloud]($trackUrl): $trackDescr"
 		}
 		// Some ignored div class names
-		// TODO: bring back parsing for socials if possible
 		"poll-embed", "embedded-publication-wrap", "paywall-jump",
 		"subscription-widget-wrap-editor", "community-chat",
 		"directMessage button", "install-substack-app-embed install-substack-app-embed-web" -> return null
@@ -366,15 +395,22 @@ private fun parseInnerHtmlToMd(elm: Element, onlyInlineElements: Boolean = false
 					throw UnsupportedInnerDivClassName(e.divClassName)
 				}
 			}
+			"label" -> {
+				// div.preformatted-block contains a hidden label.hide-text
+				// But labels don't appear anywhere else
+				if (child.className() != "hide-text") {
+					throw Exception("Unsupported label class name: ${child.className()}")
+				}
+			}
 			else -> throw UnsupportedInnerElementException(child.tagName())
 		}
 	}
 	return res.joinToString("")
 }
 
-suspend fun scrapeArticle(articleLink: String): String {
-	Logger.addLog("Scraping $articleLink...")
-	val webResult = customHttp2Request(articleLink)
+suspend fun scrapeArticle(articleId: Int, articleUrl: String): String {
+	Logger.addLog("Scraping $articleUrl...")
+	val webResult = customHttp2Request(articleUrl)
 
 	// Save article HTML for debugging (it's overwritten on subsequent calls of scrapeArticle())
 	val tmpArticleFile = File("$BASE_OUTPUT_PATH/article.html")
@@ -399,11 +435,23 @@ suspend fun scrapeArticle(articleLink: String): String {
 
 	// Find article date by parsing a variety of Regexs
 	var articleDate: String? = null
-	for (elm in articleDoc.select("div.pencraft")) {
-		val elmText = elm.text().trim()
-		if (elmText.matches(DATE_RE) || elmText.matches(DATE_RE_2)) {
-			articleDate = elmText
-			break
+	for (elm in articleDoc.select("div")) {
+		if (elm.hasClass("pencraft")) {
+			val elmText = elm.text().trim()
+			if (elmText.matches(DATE_RE) || elmText.matches(DATE_RE_2)) {
+				articleDate = elmText
+				break
+			}
+		} else if (elm.className().contains("article_bottom__")) {
+			// Such divs usually have article_bottom_randomStringHere, so the class can't be tested directly
+			val innerP = elm.selectFirst("p")
+			if (innerP != null) {
+				val innerPText = innerP.text().trim()
+				if (innerPText.matches(DATE_RE)) {
+					articleDate = innerPText
+					break
+				}
+			}
 		}
 	}
 
@@ -414,20 +462,28 @@ suspend fun scrapeArticle(articleLink: String): String {
 		throw Exception("Article date is null!")
 	}
 
-	val articleApiData: JSONObject
+	// Call the API to get the body text and author information
+	val apiResult = customHttp2Request("https://substack.com/api/v1/posts/by-id/$articleId")
+	val articleApiData = JSONObject(apiResult.text)
 	// Get the real HTML content of the article
-	// Need a special API call for some posts
-	if (articleLink.startsWith("https://substack.com/home/post/p-")) {
-		// "https://substack.com/home/post/p-".length == 33
-		val apiResult = customHttp2Request("https://substack.com/api/v1/posts/by-id/" + articleLink.slice(33..articleLink.length))
-		articleApiData = JSONObject(apiResult.text)
+	var actualArticleText: String? = null
+	if (articleUrl.startsWith("https://substack.com/home/post/p-")) {
+		actualArticleText = articleApiData.getJSONObject("post").getString("body_html")
 	} else {
 		val specialScript = articleDoc.select("script").find { it.html().startsWith("window._preloads") }?.html()
-		if (specialScript == null) throw Exception("Could not find article API data embedded in page")
-		articleApiData = JSONObject(specialScript.slice(38..(specialScript.length-2)).replace("\\\"", "\"").replace("\\\\","\\"))
+		// Articles without the special script have the body in a section tag
+		if (specialScript == null) {
+			val bodySection = articleDoc.select("section").find { it.className().contains("article_postBody__") }
+			if (bodySection != null) {
+				// Article body is wrapped in two divs
+				actualArticleText = bodySection.selectFirst("> div > div")!!.html()
+			}
+		} else {
+			actualArticleText = articleApiData.getJSONObject("post").getString("body_html")
+		}
 	}
-	val actualArticleText = articleApiData.getJSONObject("post").getString("body_html")
-	if (actualArticleText == null) throw Exception("No post.body_html field in Substack article API data")
+
+	if (actualArticleText == null) throw Exception("Could not get article HTML body")
 	tmpArticleFile.writeStr(articleApiData.toString())
 
 	// Array of objects describing the authors
@@ -460,7 +516,7 @@ suspend fun scrapeArticle(articleLink: String): String {
 	val zonedDateTime = ZonedDateTime.of(localDateTime, ZoneId.systemDefault())
 	val nowDateString = zonedDateTime.format(DateTimeFormatter.ofPattern("eee, MMM dd, YYYY, HH:mm:ss z"))
 	// This is the main string
-	var parsedArticle = "Original URL: $articleLink\n$authorStr\nScrape time: ${nowDateString}\n\n# $articleTitle"
+	var parsedArticle = "Original URL: $articleUrl\n$authorStr\nScrape time: ${nowDateString}\n\n# $articleTitle"
 	if (articleSubtitle != null) {
 		parsedArticle += "\n## $articleSubtitle"
 	}
@@ -478,6 +534,18 @@ suspend fun scrapeArticle(articleLink: String): String {
 		when (tn) {
 			"p" -> {
 				parsedArticle += "\n\n" + parseInnerHtmlToMd(elm)
+			}
+			// Top-level a are only image containers
+			"a" -> {
+				if (elm.className() != "image-link image2") throw Exception("Unrecognized class for top-level a: ${elm.className()}")
+				val imgElm = elm.selectFirst("img")
+				if (imgElm == null) throw Exception("a.image-link.image2 does not have img element")
+				val imgDataJson = JSONObject(imgElm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+				val imgSrc = imgDataJson.getString("src")
+				if (imgDataJson.isNull("title")) {
+					return "[Image]($imgSrc)"
+				}
+				parsedArticle += "\n\n[Image]($imgSrc): ${imgDataJson.getString("title")}"
 			}
 			"ul" -> {
 				parsedArticle += "\n"
@@ -513,6 +581,7 @@ suspend fun scrapeArticle(articleLink: String): String {
 			"pre", "code" -> {
 				parsedArticle += "\n\n```\n${elm.text()}\n```"
 			}
+			"hr" -> parsedArticle += "\n\n---"
 			"iframe" -> {
 				// This one is similar to div.apple-podcast-container
 				if (elm.hasClass("spotify-wrap")) {
@@ -525,6 +594,14 @@ suspend fun scrapeArticle(articleLink: String): String {
 					// Error on other iframes (must deliberately ignore them)
 					throw UnsupportedElementException(elm.tagName())
 				}
+			}
+			"figure" -> {
+				val img = elm.selectFirst("img")
+				if (img == null) throw Exception("No img in figure")
+				val figCaption = elm.selectFirst("figcaption")
+				val figCaptionMd = if (figCaption == null) ""
+					else ": " + parseInnerHtmlToMd(figCaption)
+				parsedArticle += "\n\n[Figure$figCaptionMd](${img.attribute("src")!!.value})"
 			}
 			else -> {
 				throw UnsupportedElementException(elm.tagName())
@@ -542,9 +619,9 @@ private suspend fun saveArticleToDisk(articleUid: String, articleMarkdown: Strin
 	File("${BASE_OUTPUT_PATH}/${hash[0]}/${hash[1]}/$hash.md").writeStr(articleMarkdown)
 }
 
-suspend fun getArticlesFromAuthor(authorSubdomain: String, maxLimit: Int): Set<String> {
+suspend fun getArticlesFromAuthor(authorSubdomain: String, maxLimit: Int): Set<ArticleIdAndUrl> {
 	Logger.addLog("Getting articles from $authorSubdomain...")
-	val articles = mutableSetOf<String>()
+	val articles = mutableSetOf<ArticleIdAndUrl>()
 	var offset = 0
 	while (articles.size < maxLimit && offset < 300) { // hard-stop at offset 300
 		delay(750) // Avoid calling the API too quickly
@@ -563,7 +640,10 @@ suspend fun getArticlesFromAuthor(authorSubdomain: String, maxLimit: Int): Set<S
 		for (i in 0..<apiArticlesLength) {
 			val thisArticleObj = apiArticles.getJSONObject(i)
 			if (thisArticleObj.getString("audience") == "everyone" && thisArticleObj.getString("type") != "podcast") {
-				articles.add(thisArticleObj.getString("canonical_url"))
+				articles.add(ArticleIdAndUrl(
+					thisArticleObj.getInt("id"),
+					thisArticleObj.getString("canonical_url")
+				))
 			}
 		}
 		offset += 20
@@ -573,8 +653,8 @@ suspend fun getArticlesFromAuthor(authorSubdomain: String, maxLimit: Int): Set<S
 
 suspend fun downloadArticlesFromAuthor(authorSubdomain: String, maxLimit: Int, skipExisting: Boolean = false) {
 	val articles = getArticlesFromAuthor(authorSubdomain, maxLimit)
-	for (articleUrl in articles) {
-		val articleUid = authorSubdomain + "/" + articleIdFromUrl(articleUrl)
+	for (articleInfo in articles) {
+		val articleUid = authorSubdomain + "/" + articleIdFromUrl(articleInfo.url)
 		if (skipExisting) {
 			val artHash = sha256(articleUid)
 			if (File("$BASE_OUTPUT_PATH/${artHash[0]}/${artHash[1]}/${artHash}.md").isFile()) {
@@ -582,7 +662,7 @@ suspend fun downloadArticlesFromAuthor(authorSubdomain: String, maxLimit: Int, s
 				continue
 			}
 		}
-		val articleMd = scrapeArticle(articleUrl)
+		val articleMd = scrapeArticle(articleInfo.id, articleInfo.url)
 		saveArticleToDisk(articleUid, articleMd)
 	}
 }
@@ -726,25 +806,25 @@ suspend fun getTopArticlesByKeyword(keywords: List<String>, articleCount: Int = 
 }
 
 suspend fun main(args: Array<String>) = coroutineScope {
-	Logger.preserveLogsInMemory = false
-	if (args.size == 1 && args[0] == "all") {
-		launch { updateAuthorsAndDownload(50) }.join()
-	} else if (args.size == 0 || args.size > 2) {
-		println(HELP_TEXT)
-	} else {
-		when (args[0]) {
-			"article" -> {
-				println(async { scrapeArticle(args[1]) }.await())
-			}
-			"authorSubdomain" -> {
-				launch { downloadArticlesFromAuthor(args[1], 50) }.join()
-			}
-			"category" -> {
-				launch { downloadArticlesByCategory(args[1].toInt()) }.join()
-			}
-			else -> {
-				println(HELP_TEXT)
-			}
-		}
-	}
+// 	Logger.preserveLogsInMemory = false
+// 	if (args.size == 1 && args[0] == "all") {
+// 		launch { updateAuthorsAndDownload(50) }.join()
+// 	} else if (args.size == 0 || args.size > 2) {
+// 		println(HELP_TEXT)
+// 	} else {
+// 		when (args[0]) {
+// 			"article" -> {
+// 				println(async { scrapeArticle(args[1]) }.await())
+// 			}
+// 			"authorSubdomain" -> {
+// 				launch { downloadArticlesFromAuthor(args[1], 50) }.join()
+// 			}
+// 			"category" -> {
+// 				launch { downloadArticlesByCategory(args[1].toInt()) }.join()
+// 			}
+// 			else -> {
+// 				println(HELP_TEXT)
+// 			}
+// 		}
+// 	}
 }
