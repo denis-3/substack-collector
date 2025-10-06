@@ -35,6 +35,13 @@ application {
 	applicationDefaultJvmArgs = listOf("-Dkotlinx.coroutines.debug")
 }
 
+run {
+	// Invidiual scraping function can be run with -PrunScrape
+	if (project.hasProperty("runScrape")) {
+		application.mainClass = "substacklogic.SubstackLogicKt"
+	}
+}
+
 tasks.register<Tar>("packTar") {
 	// Generate the build artifacts first
 	dependsOn("installDist")
@@ -54,12 +61,6 @@ tasks.register<Tar>("packTar") {
 			}
 		}
 	}
-}
-
-tasks.register("runScrape") {
-	// Change the entrypoint of the application if the CLI scraping functionality is requested
-	application.mainClass = "substacklogic.SubstackLogicKt"
-	dependsOn("run")
 }
 
 tasks.register("buildScrape") {

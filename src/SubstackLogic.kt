@@ -3,25 +3,26 @@ package substacklogic
 import articlefetcher.customHttp2Request
 import articlefetcher.Logger
 import articlefetcher.HttpResponseSummary
+
 import java.io.File
 import java.io.FileOutputStream
+import java.lang.Math
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.time.LocalDateTime
-import java.time.ZonedDateTime
 import java.time.ZoneId
+import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
-import java.security.MessageDigest
-import java.lang.Math
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
-import org.jsoup.Jsoup
-import org.jsoup.nodes.Element
-import org.jsoup.nodes.Attribute
-import org.json.JSONObject
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.json.JSONArray
+import org.json.JSONObject
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Attribute
+import org.jsoup.nodes.Element
 
 // Directory where output files will be stored (like downloaded articles)
 // No need for a trailing slash here
@@ -31,12 +32,14 @@ private val DATE_RE = Regex("(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (
 private val DATE_RE_2 = Regex("(0[1-9]|1[0-2])\\.(0[1-9]|[12][0-9]|3[01])\\.(\\d{2}|\\d{4})")
 private val DATE_RE_3 = Regex("\\\"post_date\\\":\\\"(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z)\\\"") // last resort
 private val HELP_TEXT = """Command line options:
-  article [articleUrl]                  Get a particular article by its link. Example: article https://read.technically.dev/p/whats-javascript
-  authorSubdomain [author's subdomain]  Get articles from an author's subdomain. For example, "authorSubdomain marketsentiment" will get articles from marketsentiment.substack.com
-  category [category ID]                Get articles from the top 100 rising authors in a category based on its ID. To get articles from the technology category (which has an ID of 4), use "category 4"
-  all                                   Get all categories as defined in a categories.txt file, and authors in subdomain-list.txt
+  article <articleId> <articleUrl>  Get a particular article by its ID and URL. Example: article 168341170 https://read.technically.dev/p/whats-javascript
+  authorSubdomain [subdomain]       Get articles from an author's subdomain.
+                                  For example, "authorSubdomain marketsentiment" will get articles from marketsentiment.substack.com
+  category [category ID]            Get articles from the top 100 rising authors in a category based on its ID.
+                                  To get articles from the technology category (which has an ID of 4), use "category 4"
+  all                               Get all categories as defined in a categories.txt file, and authors in subdomain-list.txt
 
-To make this work with Gradle, use its --args switch: gradle run --args "category 62" will invoke this class to get articles from category ID 62 (Business)"""
+To make this work with Gradle, use its --args switch: for example, gradle run -PrunScrape --args "category 62" will invoke this class to get articles from category ID 62 (Business)"""
 
 // Unsupported tags in the outer processing loop
 class UnsupportedElementException(val elementTagName: String) : Exception("Unsupported top-level tag name: $elementTagName")
@@ -61,7 +64,7 @@ data class ArticleSearchResult(val score: Double, val title: String, val author:
 data class ArticleIdAndUrl(val id: Int, val url: String)
 
 // "Article ID" is the numeric or text identifier used by Substack
-// Split the URL based on these possible strings: /p/ /p-  /cp/  /cp-
+// Split the URL based on these possible strings: /p/  /p-  /cp/  /cp-
 private fun articleIdFromUrl(articleUrl: String) =
 	when {
 		articleUrl.contains("/p/") -> articleUrl.split("/p/")[1]
@@ -245,7 +248,7 @@ private fun parseDivVariety(elm: Element): String? {
 			if (fileDetails == null) throw Exception("div.file-embed-details-h2 not found in div.file-embed-wrapper")
 			val fileDownloadBtn = elm.selectFirst("a.file-embed-button")
 			if (fileDownloadBtn == null) throw Exception("div.file-embed-wrapper has no a.file-embed-button")
-			return "[Download ${fileName.text()} (${fileDetails.text()})](${fileDownloadBtn.attribute("href")!!.value})"
+			return "[Download \"${fileName.text()}\" (${fileDetails.text()})](${fileDownloadBtn.attribute("href")!!.value})"
 		}
 		// A Latex object
 		// Can't do much here, so just display the raw formula as a code block
@@ -462,28 +465,28 @@ suspend fun scrapeArticle(articleId: Int, articleUrl: String): String {
 		throw Exception("Article date is null!")
 	}
 
-	// Call the API to get the body text and author information
-	val apiResult = customHttp2Request("https://substack.com/api/v1/posts/by-id/$articleId")
-	val articleApiData = JSONObject(apiResult.text)
-	// Get the real HTML content of the article
-	var actualArticleText: String? = null
-	if (articleUrl.startsWith("https://substack.com/home/post/p-")) {
-		actualArticleText = articleApiData.getJSONObject("post").getString("body_html")
-	} else {
-		val specialScript = articleDoc.select("script").find { it.html().startsWith("window._preloads") }?.html()
-		// Articles without the special script have the body in a section tag
-		if (specialScript == null) {
-			val bodySection = articleDoc.select("section").find { it.className().contains("article_postBody__") }
-			if (bodySection != null) {
-				// Article body is wrapped in two divs
-				actualArticleText = bodySection.selectFirst("> div > div")!!.html()
-			}
+	// This script has information about the post from the substack API
+	val windowPreloadsScript = articleDoc.select("script").find { it.html().startsWith("window._preloads") }
+	val articleApiData: JSONObject // API data, either from script or API call
+	val actualArticleText: String // Article HTML text
+	// Save on an API call if the initial scrape has the script with the API data
+	if (articleUrl.startsWith("https://substack.com/home/post/p-") || windowPreloadsScript == null) {
+		val apiResult = customHttp2Request("https://substack.com/api/v1/posts/by-id/$articleId")
+		articleApiData = JSONObject(apiResult.text)
+		// Some articles have all the text in this section element
+		val bodySection = articleDoc.select("section").find { it.className().contains("article_postBody__") }
+		if (bodySection != null) {
+			// Article body is wrapped in two divs
+			actualArticleText = bodySection.selectFirst("> div > div")!!.html()
 		} else {
 			actualArticleText = articleApiData.getJSONObject("post").getString("body_html")
 		}
+	} else {
+		val scriptData = windowPreloadsScript.html()
+		articleApiData = JSONObject(scriptData.slice(38..<(scriptData.length - 2)).replace("\\\"", "\"").replace("\\\\", "\\"))
+		actualArticleText = articleApiData.getJSONObject("post").getString("body_html")
 	}
 
-	if (actualArticleText == null) throw Exception("Could not get article HTML body")
 	tmpArticleFile.writeStr(articleApiData.toString())
 
 	// Array of objects describing the authors
@@ -495,7 +498,7 @@ suspend fun scrapeArticle(articleId: Int, articleUrl: String): String {
 	val authorStr = when (authorList.size) {
 		0 -> {
 			// Publication info can be either in "pub" or "publication"
-			if (articleApiData.has("pub")) {
+			"Original author: " + if (articleApiData.has("pub")) {
 				articleApiData.getJSONObject("pub").getString("name")
 			} else {
 				articleApiData.getJSONObject("publication").getString("name")
@@ -611,12 +614,15 @@ suspend fun scrapeArticle(articleId: Int, articleUrl: String): String {
 	return parsedArticle
 }
 
+// `articleUid` is the author subdomain joined with the article slug by a slash, e.g., "myAuthor/article-title-example-123"
 private suspend fun saveArticleToDisk(articleUid: String, articleMarkdown: String) {
-	val hash = sha256(articleUid)
 	if (!File(BASE_OUTPUT_PATH).isDirectory()) throw Exception("BASE_OUTPUT_PATH is not a directory: $BASE_OUTPUT_PATH")
-	val thisArticleOutputPath = File("${BASE_OUTPUT_PATH}/${hash[0]}/${hash[1]}/")
-	if (!thisArticleOutputPath.isDirectory()) thisArticleOutputPath.mkdirs()
-	File("${BASE_OUTPUT_PATH}/${hash[0]}/${hash[1]}/$hash.md").writeStr(articleMarkdown)
+	val splitted = articleUid.split("/")
+	if (splitted.size != 2) throw Exception("articleUid must have exactly one forward slash")
+	val (authorSubdomain, articleSlug) = splitted
+	val thisArticleOutputPath = File("$BASE_OUTPUT_PATH/$authorSubdomain")
+	if (!thisArticleOutputPath.isDirectory()) thisArticleOutputPath.mkdir()
+	File("$BASE_OUTPUT_PATH/$authorSubdomain/$articleSlug.md").writeStr(articleMarkdown)
 }
 
 suspend fun getArticlesFromAuthor(authorSubdomain: String, maxLimit: Int): Set<ArticleIdAndUrl> {
@@ -639,7 +645,10 @@ suspend fun getArticlesFromAuthor(authorSubdomain: String, maxLimit: Int): Set<A
 		if (apiArticlesLength == 0) break
 		for (i in 0..<apiArticlesLength) {
 			val thisArticleObj = apiArticles.getJSONObject(i)
-			if (thisArticleObj.getString("audience") == "everyone" && thisArticleObj.getString("type") != "podcast") {
+			val articleType = thisArticleObj.getString("type")
+			if (thisArticleObj.getString("audience") == "everyone" && // Filter out paid articles
+				articleType != "podcast" && // Podcast-type articles usually don't have much text associated with them
+				articleType != "thread") { // "Thread"-type articles are conversations with the author
 				articles.add(ArticleIdAndUrl(
 					thisArticleObj.getInt("id"),
 					thisArticleObj.getString("canonical_url")
@@ -760,71 +769,106 @@ suspend fun getTopArticlesByKeyword(keywords: List<String>, articleCount: Int = 
 	// Pair of score, article UID hash
 	val topArticles = MutableList<ArticleSearchResult>(articleCount) { ArticleSearchResult(0.0, "", "", "") }
 	var totalArticles = 0
-	for (combo in 0..255) {
-		val hex = combo.toHexString(HexFormat {number { minLength = 2; removeLeadingZeros = true } } )
-		val files = File("$BASE_OUTPUT_PATH/${hex[0]}/${hex[1]}").listFiles()
-		if (files != null) {
-			for (file in files) {
-				totalArticles ++
-				val fullText = file.bufferedReader().use { it.readText() }
-				// How many keywords are present in the article
-				var keywordInclusionCt = 0
-				var articleScore = 0.0
-				for (kw in lowerKeywords) {
-					var kwCount = 0
-					var latestKwIndex = fullText.indexOf(kw)
-					while (latestKwIndex != -1) {
-						kwCount ++
-						latestKwIndex = fullText.indexOf(kw, latestKwIndex + 1)
-					}
-					if (kwCount == 0) continue
-					keywordInclusionCt ++
-					// Article score is exponential
-					// The handy left bit shift operator can do powers of two!
-					articleScore += kwCount * (1 shl kw.length)
+	val authorFolders = File(BASE_OUTPUT_PATH).listFiles(File::isDirectory)
+	for (authorFolder in authorFolders) {
+		val files = authorFolder.listFiles(File::isFile)
+		if (files == null) continue
+		for (file in files) {
+			totalArticles ++
+			val fullText = file.bufferedReader().use { it.readText() }
+			// How many keywords are present in the article
+			var keywordInclusionCt = 0
+			var articleScore = 0.0
+			for (kw in lowerKeywords) {
+				var kwCount = 0
+				var latestKwIndex = fullText.indexOf(kw)
+				while (latestKwIndex != -1) {
+					kwCount ++
+					latestKwIndex = fullText.indexOf(kw, latestKwIndex + 1)
 				}
+				if (kwCount == 0) continue
+				keywordInclusionCt ++
+				// Article score is exponential
+				// The handy left bit shift operator can do powers of two!
+				articleScore += kwCount * (1 shl kw.length)
+			}
 
-				articleScore *= Math.pow(keywordInclusionCt.toDouble() /
-					totalKeywordCt.toDouble(), 2.toDouble()) / Math.sqrt(fullText.length.toDouble())
+			articleScore *= Math.pow(keywordInclusionCt.toDouble() /
+				totalKeywordCt.toDouble(), 2.toDouble()) / Math.sqrt(fullText.length.toDouble())
 
-				// If it has a score better than the worst top article, add it in the array and recompute
-				if (articleScore > topArticles[articleCount - 1].score) {
-					// Author is on the second line after "Original author: ..."
-					val newlineIdx = fullText.indexOf("\n")
-					val author = fullText.slice((fullText.indexOf(":", newlineIdx)+2)..<fullText.indexOf("\n", newlineIdx+1))
-					// Title is always on the fifth line of the file, after the first # character
-					val hashtagIdx = fullText.indexOf("#")
-					val title = fullText.slice((hashtagIdx+2)..<(fullText.indexOf("\n", hashtagIdx)))
-					topArticles.add(ArticleSearchResult(articleScore, title, author, file.getName()))
-					topArticles.sortBy { -it.score } // The sort is descending by default
-					topArticles.removeLast()
-				}
+			// If it has a score better than the worst top article, add it in the array and recompute
+			if (articleScore > topArticles[articleCount - 1].score) {
+				// Author is on the second line after "Original author: ..."
+				val newlineIdx = fullText.indexOf("\n")
+				val author = fullText.slice((fullText.indexOf(":", newlineIdx)+2)..<fullText.indexOf("\n", newlineIdx+1))
+				// Title is always on the fifth line of the file, after the first # character
+				val hashtagIdx = fullText.indexOf("#")
+				val title = fullText.slice((hashtagIdx+2)..<(fullText.indexOf("\n", hashtagIdx)))
+				topArticles.add(ArticleSearchResult(articleScore, title, author, authorFolder.getName() + "/" + file.getName()))
+				topArticles.sortBy { -it.score } // The sort is descending by default
+				topArticles.removeLast()
 			}
 		}
 	}
 	return Pair(topArticles, totalArticles)
 }
 
-suspend fun main(args: Array<String>) = coroutineScope {
-// 	Logger.preserveLogsInMemory = false
-// 	if (args.size == 1 && args[0] == "all") {
-// 		launch { updateAuthorsAndDownload(50) }.join()
-// 	} else if (args.size == 0 || args.size > 2) {
-// 		println(HELP_TEXT)
-// 	} else {
-// 		when (args[0]) {
-// 			"article" -> {
-// 				println(async { scrapeArticle(args[1]) }.await())
-// 			}
-// 			"authorSubdomain" -> {
-// 				launch { downloadArticlesFromAuthor(args[1], 50) }.join()
-// 			}
-// 			"category" -> {
-// 				launch { downloadArticlesByCategory(args[1].toInt()) }.join()
-// 			}
-// 			else -> {
-// 				println(HELP_TEXT)
-// 			}
-// 		}
-// 	}
+suspend fun main(args: Array<String>) {
+	if (args.size == 0 || args[0] == "help") {
+		return println(HELP_TEXT)
+	}
+	val subcommandArgCount = mapOf(
+		"all" to 0,
+		"article" to 2,
+		"authorSubdomain" to 1,
+		"category" to 1,
+		"keywordSearch" to 1 // keywordSearch has one argument which is a comma-separated list of keywords
+	)
+	if (subcommandArgCount.getOrDefault(args[0], null) != args.size - 1) {
+		return println(HELP_TEXT)
+	}
+	Logger.preserveLogsInMemory = false
+	coroutineScope {
+		when (args[0]) {
+			"all" -> {
+				launch { updateAuthorsAndDownload() }.join()
+			}
+			"article" -> {
+				val articleId = args[1].toIntOrNull()
+				if (articleId == null || articleId <= 0) {
+					println("Error: article ID is not a positive integer")
+					return@coroutineScope println(HELP_TEXT)
+				}
+				println(async { scrapeArticle(articleId, args[2]) }.await())
+			}
+			"authorSubdomain" -> {
+				launch { downloadArticlesFromAuthor(args[1], 50) }.join()
+			}
+			"category" -> {
+				launch { downloadArticlesByCategory(args[1].toInt()) }.join()
+			}
+			"keywordSearch" -> {
+				val keywords = args[1].split(",")
+				if (keywords.any { it == "" }) {
+					println("Error: Cannot have an empty keyword")
+					return@coroutineScope println(HELP_TEXT)
+				}
+				val result = async { getTopArticlesByKeyword(keywords) }.await()
+				println("Top ${result.first.size} results from ${result.second} searched articles:")
+				for (i in result.first.indices) {
+					val res = result.first[i]
+					println("Score: ${res.score}")
+					println("Title: ${res.title}")
+					println("Author: ${res.author}")
+					println("File: $BASE_OUTPUT_PATH/${res.fileName}")
+					if (i < result.first.size - 1) {
+						println()
+					}
+				}
+			}
+			else -> {
+				throw NotImplementedError("The \"${args[0]}\" command is not implemented")
+			}
+		}
+	}
 }

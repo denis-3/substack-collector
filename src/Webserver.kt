@@ -147,23 +147,28 @@ class HomePageHandler() : HttpHandler {
 						mapOf("Content-Type" to "text/plain; charset=UTF-8"),
 						"Searched $articleCount articles in $searchTime ms\n$returnText\n")
 				} else if (path.startsWith("/download/")) {
+					// The URI for this endpoint is like /download/authorSubdomain/article-slug-here-123.md
 					val fileNamePathParam = path.slice((path.indexOf("/", 1)+1)..<path.length)
-					// (sha256("any string") + ".md").length == 67
-					if (fileNamePathParam.length != 67) {
-						return exchange.sendStringAndClose(400,
+					if (fileNamePathParam.indexOf("/") == -1) {
+						return exchange.sendStringAndClose(404,
 							mapOf("Content-Type" to "text/plain; charset=UTF-8"),
-							"Must have a path parameter corresponding to a downloaded article file name\n")
+							"Author subdomain was not specified\n")
+					} else if (!fileNamePathParam.endsWith(".md")) {
+						return exchange.sendStringAndClose(404,
+							mapOf("Content-Type" to "text/plain; charset=UTF-8"),
+							"A markdown file was not specified\n")
 					}
-					val articleFile = File("$BASE_OUTPUT_PATH/${fileNamePathParam[0]}/${fileNamePathParam[1]}/$fileNamePathParam")
+					val articleFile = File("$BASE_OUTPUT_PATH/$fileNamePathParam")
 					if (!articleFile.isFile()) {
 						return exchange.sendStringAndClose(404,
 							mapOf("Content-Type" to "text/plain; charset=UTF-8"),
 							"This article file was not found in the storage\n")
 					}
 					val articleText = articleFile.bufferedReader().use { it.readText() }
+					val attachmentFileName = fileNamePathParam.replace("/", "_")
 					return exchange.sendStringAndClose(200,
 						mapOf("Content-Type" to "text/markdown; charset=UTF-8",
-							"Content-Disposition" to "attachment; filename=$fileNamePathParam"),
+							"Content-Disposition" to "attachment; filename=$attachmentFileName"),
 						articleText)
 				}
 			}
