@@ -74,13 +74,6 @@ private fun articleIdFromUrl(articleUrl: String) =
 		else -> throw Exception("Can't get ID from article URL: $articleUrl")
 	}
 
-// Convenience hashing function
-private fun sha256(inp: String): String {
-	val msgDig = MessageDigest.getInstance("SHA-256")
-	msgDig.update(inp.toByteArray())
-	return msgDig.digest().joinToString("") {"%02x".format(it)}
-}
-
 // Parse a div with a class name
 // divs can take on different class names for different purposes
 private fun parseDivVariety(elm: Element): String? {
@@ -297,6 +290,13 @@ private fun parseDivVariety(elm: Element): String? {
 			val trackDescr = scTrackJson.getString("description").truncateToLength(60).replace("\\n", "\n")
 			val trackUrl = scTrackJson.getString("targetUrl")
 			return "[Listen to \"$trackTitle\" by $trackAuthor on SoundCloud]($trackUrl): $trackDescr"
+		}
+		"bandcamp-wrap" -> {
+			val trackJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val trackTitle = trackJson.getString("title") // this already has the byline
+			val trackDesc = trackJson.getString("description")
+			val trackUrl = trackJson.getString("url")
+			return "[Listen to \"$trackTitle\" on Bandcamp]($trackUrl): $trackDesc"
 		}
 		// Some ignored div class names
 		"poll-embed", "embedded-publication-wrap", "paywall-jump",
@@ -665,8 +665,7 @@ suspend fun downloadArticlesFromAuthor(authorSubdomain: String, maxLimit: Int, s
 	for (articleInfo in articles) {
 		val articleUid = authorSubdomain + "/" + articleIdFromUrl(articleInfo.url)
 		if (skipExisting) {
-			val artHash = sha256(articleUid)
-			if (File("$BASE_OUTPUT_PATH/${artHash[0]}/${artHash[1]}/${artHash}.md").isFile()) {
+			if (File("$BASE_OUTPUT_PATH/$articleUid.md").isFile()) {
 				Logger.addLog("Skipping article $articleUid because it already exists...")
 				continue
 			}
