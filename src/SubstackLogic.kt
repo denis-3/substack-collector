@@ -216,6 +216,12 @@ private fun parseDivVariety(elm: Element): String? {
 			val ytVideoId = elm.id().split("-")[1]
 			return "[YouTube Video Embed](https://youtu.be/${ytVideoId})"
 		}
+		"vimeo-wrap" -> {
+			// No other information is available other than the video ID
+			val vimeoVidId = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+				.getString("videoId")
+			return "[Vimeo Video Embed](https://vimeo.com/$vimeoVidId)"
+		}
 		// An embedded Substack comment
 		"comment" -> {
 			val commentJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
@@ -223,6 +229,14 @@ private fun parseDivVariety(elm: Element): String? {
 			val poster = commentJson.getString("name")
 			val commentBody = commentJson.getString("body").replace("\\n", "\n")
 			return "Comment from $poster: $commentBody"
+		}
+		// This seems to be similar to comment, like a chat thread
+		// Also there is not much data to get here
+		"community-post" -> {
+			val communityPostJson = JSONObject(elm.attribute("data-attrs")!!.value.replace("&quot;", "\""))
+			val postAuthor = communityPostJson.getJSONObject("author").getString("name")
+			val postUrl = communityPostJson.getString("url")
+			return "[Community post by $postAuthor]($postUrl)"
 		}
 		// Best thing to do is just get the iframe's URL
 		"apple-podcast-container" -> {
@@ -493,7 +507,11 @@ suspend fun scrapeArticle(articleId: Int, articleUrl: String): String {
 	val articlePublishedBy = articleApiData.getJSONObject("post").getJSONArray("publishedBylines")
 	val authorList = mutableListOf<String>()
 	for (i in 0..<articlePublishedBy.length()) {
-		authorList.add(articlePublishedBy.getJSONObject(i).getString("name"))
+		val articleByItem = articlePublishedBy.getJSONObject(i)
+		// Sometimes publishedBylines can have elements will null names
+		if (!articleByItem.isNull("name")) {
+			authorList.add(articleByItem.getString("name"))
+		}
 	}
 	val authorStr = when (authorList.size) {
 		0 -> {
@@ -593,6 +611,12 @@ suspend fun scrapeArticle(articleId: Int, articleUrl: String): String {
 						podcastJson.getString("subtitle")
 					val podcastUrl = podcastJson.getString("url")
 					parsedArticle += "\n\n[Listen to \"$podcastFullTitle\" on Spotify]($podcastUrl)"
+				} else if (elm.className() == "") {
+					// It's not feasible to have custom parsing for every possible iframe src
+					// so the best thing to do is just report the page it displays
+					val iframeSrc = elm.attribute("src")
+					if (iframeSrc == null) throw Exception("iframe element does not have an src attribute")
+					parsedArticle += "\n\n[Interactive Frame to $iframeSrc]($iframeSrc)"
 				} else {
 					// Error on other iframes (must deliberately ignore them)
 					throw UnsupportedElementException(elm.tagName())
