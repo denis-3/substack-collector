@@ -81,7 +81,7 @@ private fun parseDivVariety(elm: Element): String? {
 	when (elm.className()) {
 		"captioned-image-container" -> {
 			val imgElm = elm.selectFirst("img")
-			if (imgElm == null) throw Exception("No img element in a div.captioned-image-container")
+			if (imgElm == null) return null // it is possible for div.captioned-image-container not have an img (e.g., if the author misconfigures it)
 			val imgElmSrc = imgElm.attribute("src")
 			if (imgElmSrc == null) throw Exception("img in div.captioned-image-container has no src attribute")
 			val imgCaptionElm = elm.selectFirst("figcaption")
@@ -586,6 +586,12 @@ suspend fun scrapeArticle(articleId: Int, articleUrl: String): String {
 				parsedArticle += "\n\n" + "#".repeat(tn[1].digitToInt()) + " " + elm.text()
 			}
 			"div" -> {
+				if (elm.attribute("data-component-name")?.value == "AssetErrorToDOM") {
+					// divs that are marked as errors need to be ignored.
+					// for example, see the divs containing the "Image not found" pictures in
+					// https://www.ai-supremacy.com/p/state-of-ai-2025-demand-for-compute-is-king
+					continue
+				}
 				if (elm.className() == "") {
 					parsedArticle += "\n\n" + parseInnerHtmlToMd(elm)
 				} else {
